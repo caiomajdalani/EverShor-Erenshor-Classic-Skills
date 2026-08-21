@@ -4,7 +4,7 @@ An EverQuest-inspired skills, classes and tradeskills mod for [Erenshor](https:/
 
 ## Installation
 
-### IMPORTANT: DOWNLOAD THE LATEST VERSION OF THE ADDON FROM DISCORD https://discord.com/channels/1099145747364057118/1487583970370519071/1538004888250884226
+### IMPORTANT: DOWNLOAD THE LATEST VERSION OF THE ADDON FROM DISCORD https://discord.com/channels/1099145747364057118/1487583970370519071/1538004888250884226 or here on Github
 
 1. **Install BepInEx 5** for Erenshor if you haven't already:
    - Download [BepInEx 5.x](https://github.com/BepInEx/BepInEx/releases) (Unity Mono version)
