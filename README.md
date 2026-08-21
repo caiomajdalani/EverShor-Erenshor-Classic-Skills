@@ -1,4 +1,4 @@
-# Evershor - Classic Skills and Features
+# Evershor - Classic Skills, Classes and Features
 
 An EverQuest-inspired skills, classes and tradeskills mod for [Erenshor](https://store.steampowered.com/app/2382520/Erenshor/). Adds 25 trackable skills, 2 new classes, 7 tradeskills with 280 recipes, 4 magic schools, a full material economy driven by mining, fishing, hunting, and boss kills.
 
