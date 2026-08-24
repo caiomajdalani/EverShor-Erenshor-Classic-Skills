@@ -21,6 +21,12 @@ namespace ErenshorSkills.Skills
         private static float _tickInterval = 5f; // XP tick every 5 seconds
         private static bool _wasInWater = false;
 
+        internal static void ResetRuntime()
+        {
+            _lastSwimTick = 0f;
+            _wasInWater = false;
+        }
+
         /// <summary>Swim speed bonus as a multiplier (1.0 = no bonus).</summary>
         public static float SpeedMultiplier =>
             1f + SkillsSaveManager.Data.Swimming.Level * 0.003f;
@@ -61,10 +67,10 @@ namespace ErenshorSkills.Skills
 
             // EQ style: you could also get skillups just standing in water,
             // but slower. Moving was the way to go.
-            SkillXpEngine.AwardXp(s, xp, showChat: false);
+            bool leveled = SkillXpEngine.AwardXp(s, xp, showChat: false);
 
             // Periodic milestone messages
-            if (s.Level % 10 == 0 && s.CurrentXp < xp * 2f)
+            if (leveled && s.Level % 10 == 0)
             {
                 ChatHelper.Send(
                     $"<color=#4FC3F7>[Swimming]</color> " +

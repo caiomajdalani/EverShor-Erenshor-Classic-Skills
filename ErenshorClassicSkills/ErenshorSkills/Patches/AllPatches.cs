@@ -5,89 +5,38 @@ using UnityEngine;
 
 namespace ErenshorSkills.Patches
 {
+    [Flags]
+    internal enum LootInjectionKind
+    {
+        Recipe = 1,
+        CreatureMaterial = 2,
+        EndgameMaterial = 4,
+    }
+
+    /// <summary>
+    /// LoadLootTable runs every time a corpse window is reopened. Keep each
+    /// custom roll tied to the corpse so reopening cannot reroll its loot.
+    /// </summary>
+    internal static class LootInjectionGuard
+    {
+        private sealed class State { public int Mask; }
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<LootTable, State>
+            States = new System.Runtime.CompilerServices.ConditionalWeakTable<LootTable, State>();
+
+        public static bool TryMark(LootTable table, LootInjectionKind kind)
+        {
+            if (table == null) return false;
+            var state = States.GetOrCreateValue(table);
+            int bit = (int)kind;
+            if ((state.Mask & bit) != 0) return false;
+            state.Mask |= bit;
+            return true;
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     // CHARACTER LOAD / SAVE
     // ═══════════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Load skill data when the game world starts.
-    /// We no longer load here because GameManager.Start fires during the character
-    /// selection screen before the player has entered the world. Loading is now
-    /// handled by DelayedCharacterLoad in Plugin.OnSceneLoaded when an actual
-    /// game zone loads.
-    /// </summary>
-    [HarmonyPatch(typeof(GameManager), "Start")]
-    public static class Patch_LoadCharacter
-    {
-        public static void Postfix()
-        {
-            // Intentionally empty — loading is handled by OnSceneLoaded
-            SkillsPlugin.Log.LogInfo("GameManager.Start fired (character select screen). Skipping skill load.");
-        }
-
-        // Keep this coroutine for reference but it's no longer called from here
-        private static System.Collections.IEnumerator DelayedLoad()
-        {
-            string name = "";
-            for (int i = 0; i < 300; i++)
-            {
-                yield return null;
-                try
-                {
-                    var stats = GameData.PlayerStats;
-                    if (stats != null)
-                    {
-                        name = stats.MyName;
-                        if (!string.IsNullOrEmpty(name)) break;
-                    }
-                }
-                catch { }
-            }
-
-            if (string.IsNullOrEmpty(name))
-                name = "DefaultChar";
-
-            try
-            {
-                SkillsSaveManager.Load(name);
-                SkillsPlugin.Log.LogInfo($"Skills loaded for '{name}'");
-
-                if (SkillsPlugin.CfgShowChatMessages.Value)
-                {
-                    var data = SkillsSaveManager.Data;
-                    int total = 0;
-                    foreach (var s in data.GetAll()) total += s.Level;
-
-                    ChatHelper.Send(
-                        $"<color=#FFD700>[Classic Skills]</color> " +
-                        $"Welcome back, {name}! " +
-                        $"<color=#AAAAAA>({total} combined skill levels | " +
-                        $"Press {SkillsPlugin.CfgSkillWindowKey.Value} for details)</color>");
-                }
-            }
-            catch (Exception ex)
-            {
-                SkillsPlugin.Log.LogError($"Error loading skills: {ex.Message}");
-            }
-
-            // Wait for ItemFactory and inventory to be ready, then restore custom items
-            yield return new UnityEngine.WaitForSeconds(3f);
-            for (int i = 0; i < 30; i++)
-            {
-                if (Items.ItemFactory.Initialized) break;
-                yield return new UnityEngine.WaitForSeconds(0.5f);
-            }
-
-            try
-            {
-                Items.ItemFactory.RestoreCustomInventory();
-            }
-            catch (Exception ex)
-            {
-                SkillsPlugin.Log.LogError($"RestoreCustomInventory error: {ex.Message}");
-            }
-        }
-    }
 
     /// <summary>Save skill data when inventory toggles, and sync skills window visibility.</summary>
     [HarmonyPatch(typeof(Inventory), "ToggleInv")]
@@ -133,7 +82,8 @@ namespace ErenshorSkills.Patches
     [HarmonyPatch(typeof(Fishing), "resetFishing")]
     public static class Patch_DoFishing
     {
-        public static void Prefix(Fishing __instance, bool ___fishCaught, bool ___fishing)
+        public static void Prefix(Fishing __instance, bool ___fishCaught, bool ___fishing,
+            Item ___caughtItem)
         {
             if (!SkillsPlugin.CfgEnableFishing.Value) return;
             // Prefix runs BEFORE resetFishing clears fishCaught
@@ -143,54 +93,62 @@ namespace ErenshorSkills.Patches
             if (!___fishing) return;
             try
             {
-                // fishCaught is true — a fish was caught this cycle.
-                // Try to get the fish name from inventory, but award XP
-                // regardless since we know a catch happened.
-                string item = "fish";
+                // resetFishing still owns the exact caughtItem reference here.
+                // Reading the last inventory entry was unreliable because the
+                // inventory list is slot-ordered, not insertion-ordered.
+                string item = ___caughtItem?.ItemName ?? "fish";
                 bool isJunk = false;
                 bool isRare = false;
-
-                var inv = GameData.PlayerInv;
-                if (inv?.StoredItems != null && inv.StoredItems.Count > 0)
+                if (!string.IsNullOrEmpty(item))
                 {
-                    var last = inv.StoredItems[inv.StoredItems.Count - 1];
-                    if (last != null && !string.IsNullOrEmpty(last.ItemName))
-                    {
-                        item = last.ItemName;
-                        string lower = item.ToLower();
-                        isJunk = lower.Contains("seaweed") || lower.Contains("boot") ||
-                                 lower.Contains("cloth shoe") || lower.Contains("driftwood");
-                        isRare = lower.Contains("moongill") || lower.Contains("stonemouth") ||
-                                 lower.Contains("treasure map") || lower.Contains("mold") ||
-                                 lower.Contains("worm eel") || lower.Contains("fanged") ||
-                                 lower.Contains("golden") || lower.Contains("caveskimmer");
-                    }
+                    string lower = item.ToLowerInvariant();
+                    isJunk = lower.Contains("seaweed") || lower.Contains("boot") ||
+                             lower.Contains("cloth shoe") || lower.Contains("driftwood");
+                    isRare = lower.Contains("moongill") || lower.Contains("stonemouth") ||
+                             lower.Contains("treasure map") || lower.Contains("mold") ||
+                             lower.Contains("worm eel") || lower.Contains("fanged") ||
+                             lower.Contains("golden") || lower.Contains("caveskimmer");
                 }
 
-                Skills.FishingSkill.OnCatch(item, isRare, isJunk);
+                bool eligibleForMaterials = Skills.FishingSkill.OnCatch(item, isRare, isJunk);
 
                 // Give cooking materials based on catch type
-                if (!isJunk)
+                if (eligibleForMaterials && !isJunk)
                 {
-                    // Common catch = Raw Fish
-                    Items.ItemFactory.GiveItemToPlayer("Raw Fish");
-
-                    // Rare catches also give special fish
+                    string specialFish = null;
                     if (isRare)
                     {
-                        string lower = item.ToLower();
+                        string lower = item.ToLowerInvariant();
                         if (lower.Contains("moongill"))
-                            Items.ItemFactory.GiveItemToPlayer("Moongill Trout");
+                            specialFish = "Moongill Trout";
                         else if (lower.Contains("golden"))
-                            Items.ItemFactory.GiveItemToPlayer("Golden Carp");
+                            specialFish = "Golden Carp";
                         else
-                        {
-                            // Other rare fish give a random special fish
-                            if (UnityEngine.Random.value < 0.5f)
-                                Items.ItemFactory.GiveItemToPlayer("Moongill Trout");
-                            else
-                                Items.ItemFactory.GiveItemToPlayer("Golden Carp");
-                        }
+                            specialFish = UnityEngine.Random.value < 0.5f
+                                ? "Moongill Trout" : "Golden Carp";
+                    }
+
+                    var mutation = Items.BagSystem.BeginExternalMutation();
+                    try
+                    {
+                        if (!Items.ItemFactory.GiveItemToPlayer("Raw Fish") ||
+                            (specialFish != null &&
+                             !Items.ItemFactory.GiveItemToPlayer(specialFish)))
+                            throw new InvalidOperationException(
+                                "There is not enough inventory space for the bonus catch materials.");
+                        if (!Items.BagSystem.CommitExternalMutation(
+                            "fishing-materials", mutation))
+                            throw new InvalidOperationException(
+                                "The bonus catch materials could not be saved.");
+                    }
+                    catch (Exception rewardError)
+                    {
+                        Items.BagSystem.RollbackExternalMutation(mutation);
+                        SkillsPlugin.Log.LogError(
+                            $"Fishing material reward rolled back: {rewardError}");
+                        ChatHelper.Send(
+                            "<color=#EF5350>[Fishing]</color> Bonus cooking " +
+                            "materials were not awarded; your original catch is safe.");
                     }
                 }
             }
@@ -279,29 +237,6 @@ namespace ErenshorSkills.Patches
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // ALCOHOL TOLERANCE PATCH
-    // ═══════════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Intercept consumable item use to award Food Tolerance XP
-    /// and extend buff duration.
-    /// </summary>
-    [HarmonyPatch(typeof(Stats), "AddStatusEffect")]
-    public static class Patch_UseConsumable
-    {
-        public static void Postfix(Stats __instance)
-        {
-            if (!SkillsPlugin.CfgEnableFoodTolerance.Value) return;
-            try
-            {
-                // Award Food Tolerance XP when a status effect is applied (includes food buffs)
-                Skills.FoodToleranceSkill.OnConsumeItem("Consumable");
-            }
-            catch { }
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
     // MEDITATION TICK (via PlayerMovement Update)
     // ═══════════════════════════════════════════════════════════════════
 
@@ -359,70 +294,38 @@ namespace ErenshorSkills.Patches
     // ═══════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Extend buff durations based on Food Tolerance skill.
-    /// Hooks AddStatusEffectNoChecks to multiply Duration by the bonus.
-    /// Also awards Food Tolerance XP when any beneficial effect is applied.
+    /// Extend the direct status effect used by Classic Skills food and drink.
+    /// Native spell buffs use AddStatusEffect and are handled separately.
     /// </summary>
     [HarmonyPatch(typeof(Stats), "AddStatusEffectNoChecks")]
     public static class Patch_BuffDuration
     {
         public static void Postfix(Stats __instance, Spell spell, bool _fromPlayer)
         {
-            if (!_fromPlayer) return;
+            if (!_fromPlayer || !SkillsSaveManager.HasLoaded) return;
             try
             {
-                // Only extend beneficial effects
-                if (spell.Type != Spell.SpellType.Beneficial) return;
-
-                // Determine if this buff came from a spell cast or from a consumable item.
-                // If the player is actively casting a spell = Abjuration (spell buff).
-                // Otherwise = Food Tolerance (food/drink consumable).
-                bool isSpellCast = false;
-                try
-                {
-                    var playerSpells = GameData.PlayerControl?.Myself?.MySpells;
-                    if (playerSpells != null)
-                        isSpellCast = playerSpells.isCasting();
-                }
-                catch { }
-
-                float totalMult = 1f;
-
-                // Food Tolerance: extends food/drink consumable buffs (not actively casting)
-                if (!isSpellCast && SkillsPlugin.CfgEnableFoodTolerance.Value)
-                {
-                    float bonus = Skills.FoodToleranceSkill.DurationBonus;
-                    if (bonus > 0f)
-                        totalMult += bonus / 100f;
-                }
-
-                // Abjuration: extends spell buffs (player actively casting)
-                if (isSpellCast && SkillsPlugin.CfgEnableMagicSkills.Value)
-                {
-                    float abjMult = Skills.MagicSkills.GetBuffDurationMultiplier();
-                    if (abjMult > 1f)
-                        totalMult += (abjMult - 1f);
-                }
-
-                if (totalMult <= 1f) return;
+                if (!SkillsPlugin.CfgEnableFoodTolerance.Value ||
+                    !Items.ItemFactory.IsConsumableSpell(spell)) return;
+                float multiplier = 1f + Skills.FoodToleranceSkill.DurationBonus / 100f;
+                if (multiplier <= 1f || __instance?.StatusEffects == null) return;
 
                 // Find the status effect that was just applied and extend it
-                for (int i = 0; i < 30; i++)
+                for (int i = 0; i < __instance.StatusEffects.Length; i++)
                 {
                     if (__instance.StatusEffects[i] != null &&
                         __instance.StatusEffects[i].Effect == spell)
                     {
                         __instance.StatusEffects[i].Duration =
-                            Mathf.RoundToInt(__instance.StatusEffects[i].Duration * totalMult);
+                            Mathf.RoundToInt(__instance.StatusEffects[i].Duration * multiplier);
                         break;
                     }
                 }
-
-                // Award Food Tolerance XP for food/drink consumables (not spell casts)
-                if (!isSpellCast && SkillsPlugin.CfgEnableFoodTolerance.Value)
-                    Skills.FoodToleranceSkill.OnConsumeItem(spell.SpellName);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning($"Food duration adjustment failed: {ex.Message}");
+            }
         }
     }
 
@@ -444,6 +347,73 @@ namespace ErenshorSkills.Patches
     [HarmonyPatch(typeof(ItemIcon), "UseConsumable")]
     public static class Patch_UseCustomConsumable
     {
+        private sealed class EffectSnapshot
+        {
+            public int Index;
+            public Spell Effect;
+            public float Duration;
+            public bool FromPlayer;
+            public int BonusDamage;
+            public bool CastedByPC;
+            public Character Owner;
+            public Character CreditDPS;
+        }
+
+        private sealed class DurationSnapshot
+        {
+            public StatusEffect Slot;
+            public Spell Effect;
+            public float Duration;
+        }
+
+        private static void RestoreEffects(Stats stats, List<EffectSnapshot> snapshots)
+        {
+            if (stats?.StatusEffects == null || snapshots == null) return;
+            foreach (var saved in snapshots)
+            {
+                if (saved == null || saved.Index < 0 ||
+                    saved.Index >= stats.StatusEffects.Length ||
+                    stats.StatusEffects[saved.Index] == null) continue;
+                var slot = stats.StatusEffects[saved.Index];
+                slot.Effect = saved.Effect;
+                slot.Duration = saved.Duration;
+                slot.fromPlayer = saved.FromPlayer;
+                slot.bonusDmg = saved.BonusDamage;
+                slot.CastedByPC = saved.CastedByPC;
+                slot.Owner = saved.Owner;
+                slot.CreditDPS = saved.CreditDPS;
+            }
+            stats.CalcStats();
+        }
+
+        private static void ExtendActiveBuffs(Stats stats, Spell newlyApplied,
+            List<DurationSnapshot> snapshots)
+        {
+            if (stats?.StatusEffects == null || snapshots == null) return;
+            foreach (var status in stats.StatusEffects)
+            {
+                var effect = status?.Effect;
+                if (effect == null || ReferenceEquals(effect, newlyApplied) ||
+                    effect.WornEffect || effect.Type != Spell.SpellType.Beneficial ||
+                    status.Duration <= 0f) continue;
+                snapshots.Add(new DurationSnapshot
+                {
+                    Slot = status,
+                    Effect = effect,
+                    Duration = status.Duration
+                });
+                status.Duration = Mathf.Min(status.Duration * 1.5f, 1000000f);
+            }
+        }
+
+        private static void RestoreDurations(List<DurationSnapshot> snapshots)
+        {
+            if (snapshots == null) return;
+            foreach (var saved in snapshots)
+                if (saved?.Slot != null && ReferenceEquals(saved.Slot.Effect, saved.Effect))
+                    saved.Slot.Duration = saved.Duration;
+        }
+
         public static bool Prefix(ItemIcon __instance)
         {
             try
@@ -457,43 +427,44 @@ namespace ErenshorSkills.Patches
                 // Recipe scrolls — right-click to learn the recipe
                 if (Stations.RecipeVendors.IsRecipeScroll(item))
                 {
-                    if (Stations.RecipeVendors.OnItemPurchased(item))
-                    {
-                        // Remove the scroll from inventory
-                        __instance.MyItem = GameData.PlayerInv.Empty;
-                        __instance.Quantity = 0;
-                        __instance.UpdateSlotImage();
-                    }
+                    Stations.RecipeVendors.TryConsumeRecipeScroll(__instance);
                     return false; // Don't pass to game's UseConsumable
                 }
 
                 // If a bag window is open, right-clicking an item stores it in the bag
                 if (Items.BagWindow.AnyOpen && !Items.BagSystem.IsBag(name))
                 {
-                    if (Items.BagSystem.TryStoreFromInventorySlot(__instance))
+                    bool cursorBusy = GameData.ItemOnCursor != null ||
+                        (GameData.MouseSlot != null && GameData.MouseSlot.dragging);
+                    if (!cursorBusy && Items.BagSystem.TryStoreFromInventorySlot(__instance))
                         return false; // Consumed the click
                 }
 
                 // Check if this is a bag — open bag window instead of consuming
                 if (Items.BagSystem.IsBag(name))
                 {
-                    // Use Quantity field to store persistent bag instance ID
-                    // Bags are non-stackable so Quantity is normally 1
-                    // We use values 100+ as our bag instance IDs
-                    int bagNum = __instance.Quantity;
-                    if (bagNum < 100)
+                    string bagId = Items.BagSystem.EnsureBagIdentity(__instance);
+                    if (string.IsNullOrEmpty(bagId))
                     {
-                        // First time opening — assign a new permanent ID
-                        bagNum = Items.BagSystem.NextBagNumber();
-                        __instance.Quantity = bagNum;
+                        ChatHelper.Send(
+                            "<color=#EF5350>[Bag]</color> The bag could not be opened " +
+                            "because its identity could not be saved safely.");
+                        return false;
                     }
-                    string bagId = $"bag{bagNum}";
                     Items.BagWindow.Open(bagId, name);
                     return false; // Don't consume the bag!
                 }
 
                 if (!Items.ItemFactory.ConsumableBuffs.TryGetValue(name, out var buff))
                     return true; // not ours, let game handle it
+
+                if (!Items.BagSystem.IsDirectInventorySlot(__instance))
+                {
+                    ChatHelper.Send(
+                        "<color=#EF5350>[Consumable]</color> Move the item into " +
+                        "your character inventory before using it.");
+                    return false;
+                }
 
                 // Check if player is alive and not casting
                 if (!GameData.PlayerControl.Myself.Alive) return false;
@@ -503,40 +474,52 @@ namespace ErenshorSkills.Patches
                 var stats = GameData.PlayerStats;
                 if (stats == null) return false;
 
-                // CATEGORY CHECK: Remove any existing buff from the same category
-                // (Food overwrites Food, Drink overwrites Drink)
+                // CATEGORY CHECK: Food overwrites Food and Drink overwrites Drink.
+                // StatusEffects is a fixed array of reusable StatusEffect objects;
+                // assigning an array element to null permanently destroys capacity.
                 string category = buff.category; // "Food" or "Drink"
                 string catTag = $"[CS_{category}]";
-                try
+                var categorySlots = new List<int>();
+                int freeSlot = -1;
+                int statusSlotCount = stats.StatusEffects == null
+                    ? 0 : Mathf.Min(30, stats.StatusEffects.Length);
+                for (int i = 0; i < statusSlotCount; i++)
                 {
-                    // Game uses StatusEffects[0..29] fixed array
-                    for (int i = 0; i < 30; i++)
+                    var eff = stats.StatusEffects[i];
+                    if (eff == null) continue;
+                    if (eff.Effect == null)
                     {
-                        var eff = stats.StatusEffects[i];
-                        if (eff != null && eff.Effect != null &&
-                            eff.Effect.SpellName != null &&
-                            eff.Effect.SpellName.Contains(catTag))
-                        {
-                            // Remove this effect by nulling the slot
-                            stats.StatusEffects[i] = null;
-                            SkillsPlugin.Log.LogInfo(
-                                $"Removed previous {category} buff: {eff.Effect.SpellName}");
-                        }
+                        if (freeSlot < 0) freeSlot = i;
+                        continue;
                     }
-                }
-                catch (Exception ex)
-                {
-                    SkillsPlugin.Log.LogWarning($"Category override error: {ex.Message}");
+                    if (!string.IsNullOrEmpty(eff.Effect.SpellName) &&
+                        eff.Effect.SpellName.Contains(catTag))
+                        categorySlots.Add(i);
                 }
 
+                if (categorySlots.Count == 0 && freeSlot < 0)
+                {
+                    ChatHelper.Send(
+                        $"<color=#EF5350>[{category}]</color> You have no free status-effect slot. " +
+                        $"The {name} was not consumed.");
+                    return false;
+                }
+
+                var mutation = Items.BagSystem.BeginExternalMutation();
+                int healthBefore = stats.CurrentHP;
                 var spell = ScriptableObject.CreateInstance<Spell>();
+                var template = item.ItemEffectOnClick;
                 // Embed category tag in spell name for later removal
+                // Persist the deterministic template ID. SpellDB is patched to
+                // resolve that template when Erenshor reloads status effects.
+                spell.Id = !string.IsNullOrEmpty(template?.Id)
+                    ? template.Id : $"CS_Buff_{name.Replace(" ", "_")}";
                 spell.SpellName = $"{name} {catTag}";
-                spell.StatusEffectMessageOnPlayer =
-                    $"You feel nourished. (+{buff.bonus} {buff.stat})";
-                // Game displays ticks * 3 as seconds, so divide by 3
-                spell.SpellDurationInTicks = Mathf.Max(1,
-                    Mathf.RoundToInt(buff.dur / 3f));
+                spell.SpellDesc = template?.SpellDesc ?? $"+{buff.bonus} {buff.stat}";
+                spell.StatusEffectMessageOnPlayer = "You feel nourished.";
+                spell.SpellDurationInTicks = template != null
+                    ? template.SpellDurationInTicks
+                    : Mathf.Max(1, Mathf.RoundToInt(buff.dur / 3f));
                 spell.SelfOnly = true;
                 spell.InflictOnSelf = true;
                 spell.InstantEffect = false;
@@ -555,40 +538,161 @@ namespace ErenshorSkills.Patches
                 }
                 catch { }
 
-                // HP for regen + named stat
-                spell.HP = buff.bonus * 5;
-                switch (buff.stat)
+                if (template != null)
                 {
-                    case "Strength":     spell.Str = buff.bonus; break;
-                    case "Agility":      spell.Agi = buff.bonus; break;
-                    case "Endurance":    spell.End = buff.bonus; break;
-                    case "Intelligence": spell.Int = buff.bonus; break;
-                    case "Wisdom":       spell.Wis = buff.bonus; break;
-                    case "Charisma":     spell.Cha = buff.bonus; break;
-                    case "Dexterity":    spell.Dex = buff.bonus; break;
+                    spell.Str = template.Str; spell.End = template.End;
+                    spell.Dex = template.Dex; spell.Agi = template.Agi;
+                    spell.Int = template.Int; spell.Wis = template.Wis;
+                    spell.Cha = template.Cha; spell.HP = template.HP;
+                    spell.Mana = template.Mana; spell.AC = template.AC;
+                    spell.MR = template.MR; spell.ER = template.ER;
+                    spell.PR = template.PR; spell.VR = template.VR;
+                    spell.TargetHealing = template.TargetHealing;
+                    spell.Haste = template.Haste;
+                    spell.MyDamageType = template.MyDamageType;
+                }
+                else
+                {
+                    spell.HP = buff.bonus * 5;
+                    switch (buff.stat)
+                    {
+                        case "All Stats":
+                            spell.Str = spell.End = spell.Dex = spell.Agi =
+                                spell.Int = spell.Wis = spell.Cha = buff.bonus;
+                            break;
+                        case "Strength":     spell.Str = buff.bonus; break;
+                        case "Agility":      spell.Agi = buff.bonus; break;
+                        case "Endurance":    spell.End = buff.bonus; break;
+                        case "Intelligence": spell.Int = buff.bonus; break;
+                        case "Wisdom":       spell.Wis = buff.bonus; break;
+                        case "Charisma":     spell.Cha = buff.bonus; break;
+                        case "Dexterity":    spell.Dex = buff.bonus; break;
+                    }
                 }
 
                 // Use the item's icon for the buff icon
                 spell.SpellIcon = item.ItemIcon;
 
-                stats.AddStatusEffectNoChecks(spell, true, 0, null);
-
-                ChatHelper.Send(
-                    $"<color=#CDDC39>[{category}]</color> " +
-                    $"You consume the {name}. +{buff.bonus} {buff.stat} " +
-                    $"for {buff.dur / 60f:F0} min.");
-
-                // Remove item using the game's own pattern:
-                // Quantity--, then set to Empty if 0, then UpdateSlotImage
-                if (item.Disposable)
+                var replacedEffects = new List<EffectSnapshot>();
+                foreach (int index in categorySlots)
                 {
-                    __instance.Quantity--;
+                    var old = stats.StatusEffects[index];
+                    replacedEffects.Add(new EffectSnapshot
+                    {
+                        Index = index,
+                        Effect = old.Effect,
+                        Duration = old.Duration,
+                        FromPlayer = old.fromPlayer,
+                        BonusDamage = old.bonusDmg,
+                        CastedByPC = old.CastedByPC,
+                        Owner = old.Owner,
+                        CreditDPS = old.CreditDPS
+                    });
                 }
-                if (__instance.Quantity <= 0)
+
+                try
                 {
-                    __instance.MyItem = GameData.PlayerInv.Empty;
+                    foreach (int index in categorySlots)
+                    {
+                        SkillsPlugin.Log.LogInfo(
+                            $"Replacing previous {category} buff: " +
+                            stats.StatusEffects[index].Effect.SpellName);
+                        stats.RemoveStatusEffect(index);
+                    }
+                    stats.AddStatusEffectNoChecks(spell, true, 0, null);
                 }
-                __instance.UpdateSlotImage();
+                catch (Exception ex)
+                {
+                    RestoreEffects(stats, replacedEffects);
+                    UnityEngine.Object.Destroy(spell);
+                    SkillsPlugin.Log.LogError($"Could not apply {category} buff: {ex}");
+                    ChatHelper.Send(
+                        $"<color=#EF5350>[{category}]</color> The buff could not be applied. " +
+                        $"The {name} was not consumed.");
+                    return false;
+                }
+
+                StatusEffect applied = null;
+                for (int i = 0; i < statusSlotCount; i++)
+                {
+                    var candidate = stats.StatusEffects[i];
+                    if (candidate != null && ReferenceEquals(candidate.Effect, spell))
+                    {
+                        applied = candidate;
+                        break;
+                    }
+                }
+                if (applied == null)
+                {
+                    RestoreEffects(stats, replacedEffects);
+                    UnityEngine.Object.Destroy(spell);
+                    ChatHelper.Send(
+                        $"<color=#EF5350>[{category}]</color> The buff did not take hold. " +
+                        $"The {name} was not consumed.");
+                    return false;
+                }
+
+                var extendedDurations = new List<DurationSnapshot>();
+                try
+                {
+                    if (!string.IsNullOrEmpty(item.Lore) &&
+                        item.Lore.IndexOf("extends active buffs by 50%",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        ExtendActiveBuffs(stats, spell, extendedDurations);
+
+                    if (!string.IsNullOrEmpty(item.Lore) &&
+                        item.Lore.IndexOf("full hp restore",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        stats.CurrentHP = stats.CurrentMaxHP;
+
+                    // Remove item using the game's own pattern, then make the
+                    // item removal and native inventory save one transaction.
+                    if (item.Disposable)
+                        __instance.Quantity--;
+                    if (__instance.Quantity <= 0)
+                    {
+                        __instance.MyItem = GameData.PlayerInv.Empty;
+                        __instance.Quantity = 1;
+                    }
+                    __instance.UpdateSlotImage();
+
+                    if (!Items.BagSystem.CommitExternalMutation(
+                        $"consume-{category.ToLowerInvariant()}", mutation))
+                        throw new InvalidOperationException(
+                            "The inventory transaction could not be saved.");
+
+                    foreach (var oldEffect in replacedEffects)
+                        if (oldEffect?.Effect != null)
+                            UnityEngine.Object.Destroy(oldEffect.Effect);
+
+                    ChatHelper.Send(
+                        $"<color=#CDDC39>[{category}]</color> " +
+                        $"You consume the {name}. " +
+                        $"<color=#AAAAAA>{spell.SpellDesc}</color>");
+                }
+                catch (Exception transactionError)
+                {
+                    for (int i = 0; i < statusSlotCount; i++)
+                    {
+                        var candidate = stats.StatusEffects[i];
+                        if (candidate != null && ReferenceEquals(candidate.Effect, spell))
+                        {
+                            stats.RemoveStatusEffect(i);
+                            break;
+                        }
+                    }
+                    RestoreDurations(extendedDurations);
+                    RestoreEffects(stats, replacedEffects);
+                    stats.CurrentHP = healthBefore;
+                    Items.BagSystem.RollbackExternalMutation(mutation);
+                    UnityEngine.Object.Destroy(spell);
+                    SkillsPlugin.Log.LogError(
+                        $"Consumable transaction rolled back: {transactionError}");
+                    ChatHelper.Send(
+                        $"<color=#EF5350>[{category}]</color> The {name} was not " +
+                        $"consumed because the inventory save failed.");
+                    return false;
+                }
 
                 return false; // skip game's UseConsumable
             }
@@ -627,6 +731,7 @@ namespace ErenshorSkills.Patches
         public static void Prefix(LootTable __instance)
         {
             if (!SkillsSaveManager.HasLoaded) return;
+            if (!LootInjectionGuard.TryMark(__instance, LootInjectionKind.Recipe)) return;
 
             try
             {
@@ -721,6 +826,7 @@ namespace ErenshorSkills.Patches
         public static void Prefix(LootTable __instance)
         {
             if (!SkillsSaveManager.HasLoaded) return;
+            if (!LootInjectionGuard.TryMark(__instance, LootInjectionKind.CreatureMaterial)) return;
             try
             {
                 var character = __instance.GetComponent<Character>();
@@ -735,7 +841,7 @@ namespace ErenshorSkills.Patches
                 }
                 catch { }
                 if (string.IsNullOrEmpty(mobName)) return;
-                string lower = mobName.ToLower();
+                string lower = mobName.ToLowerInvariant();
 
                 // ── Spider silk drops ──
                 bool isSpider = lower.Contains("spider") || lower.Contains("arachn");
@@ -905,133 +1011,11 @@ namespace ErenshorSkills.Patches
                         __instance.ActualDrops.Add(hide);
                 }
 
-                // ── Endgame boss drops: Thread of Fate, Essence of Eternity ──
-                bool isBoss = false;
-                try { isBoss = character.BossXp > 1f; } catch { }
-                if (isBoss && mobLevel >= 25)
-                {
-                    // 10% Thread of Fate from endgame bosses
-                    if (UnityEngine.Random.value <= 0.10f)
-                    {
-                        var fate = Items.ItemFactory.GetItem("Thread of Fate");
-                        if (fate != null && __instance.ActualDrops.Count < 8)
-                            __instance.ActualDrops.Add(fate);
-                    }
-                    // 8% Essence of Eternity from endgame bosses
-                    if (UnityEngine.Random.value <= 0.08f)
-                    {
-                        var ess = Items.ItemFactory.GetItem("Essence of Eternity");
-                        if (ess != null && __instance.ActualDrops.Count < 8)
-                            __instance.ActualDrops.Add(ess);
-                    }
-                }
+                // Endgame materials are rolled once by Patch_EndgameMaterialDrop.
+                // Keeping the roll out of this beast-material patch prevents
+                // wyrm/dragon bosses from receiving a second overlapping roll.
             }
             catch { }
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // MINING NODE BONUS DROPS
-    // ═══════════════════════════════════════════════════════════════════
-
-    [HarmonyPatch(typeof(PlayerCombat), "TryMine")]
-    public static class Patch_MiningBonus
-    {
-        private static int GetZoneTier(string scene)
-        {
-            switch (scene)
-            {
-                case "Stowaway": case "Tutorial": case "ShiveringStep": return 1;
-                case "Azure": case "Windwashed": case "FernallaField": case "Willowwatch": return 2;
-                case "Silkengrass": case "Braxonian": case "Brake": case "Loomingwood": return 3;
-                case "Soluna": case "Ripper": case "Rottenfoot": return 4;
-                case "Hidden": case "Azynthi": case "AzynthiClear":
-                case "Underspine": case "PrielPlateau": case "Krakengard": return 5;
-                default: return 2;
-            }
-        }
-
-        private static readonly string[][] TierOres = {
-            new string[0],
-            new[] { "Chunk of Copper Ore", "Chunk of Iron Ore", "Coal" },
-            new[] { "Chunk of Iron Ore", "Coal", "Chunk of Silver Ore" },
-            new[] { "Chunk of Silver Ore", "Chunk of Gold Ore", "Chunk of Adamantite Ore" },
-            new[] { "Chunk of Gold Ore", "Chunk of Platinum Ore", "Chunk of Adamantite Ore" },
-            new[] { "Chunk of Platinum Ore", "Chunk of Adamantite Ore" },
-        };
-        private static readonly string[][] TierGems = {
-            new string[0],
-            new[] { "Smooth Pebble", "Rough Geode" },
-            new[] { "Rough Geode", "Moonstone Pebble", "Glimmering Geode Fragment" },
-            new[] { "Rough Ruby", "Rough Emerald", "Rough Sapphire", "Bloodstone Chip" },
-            new[] { "Rough Ruby", "Rough Sapphire", "Flawless Diamond", "Abyssal Opal" },
-            new[] { "Flawless Diamond", "Abyssal Opal", "Starshard Crystal", "Prismatic Jewel" },
-        };
-        private static readonly string[][] TierMetals = {
-            new string[0],
-            new string[0],
-            new[] { "Moonsilver Bar" },
-            new[] { "Moonsilver Bar", "Sunforged Ingot", "Void Iron Chunk" },
-            new[] { "Sunforged Ingot", "Void Iron Chunk", "Soulsteel Billet" },
-            new[] { "Soulsteel Billet", "Starmetal Fragment" },
-        };
-        private static readonly string[] EndgameMining = {
-            "Crystallized Time", "Worldtree Splinter", "Essence of Eternity"
-        };
-
-        public static void Postfix(Character target)
-        {
-            if (!SkillsSaveManager.HasLoaded) return;
-            try
-            {
-                if (target == null || !target.isNPC) return;
-                if (target.GetComponent<MiningNode>() == null) return;
-
-                string scene = UnityEngine.SceneManagement.SceneManager
-                    .GetActiveScene().name;
-                int tier = GetZoneTier(scene);
-                if (tier <= 0) return;
-
-                // Check player level — must be appropriate level for zone tier
-                int playerLevel = 1;
-                try { playerLevel = Mathf.Max(1, GameData.PlayerStats?.Level ?? 1); }
-                catch { }
-                int[] requiredLevels = { 0, 1, 5, 12, 18, 25, 30 };
-                int reqLvl = tier < requiredLevels.Length ? requiredLevels[tier] : 30;
-                if (playerLevel < reqLvl)
-                    tier = 1; // Downgrade to T1 if underleveled
-
-                var inv = GameData.PlayerInv;
-                if (inv == null) return;
-
-                // 40% bonus ore
-                if (tier < TierOres.Length && TierOres[tier].Length > 0 &&
-                    UnityEngine.Random.value <= 0.40f)
-                    GiveBonus(inv, TierOres[tier][UnityEngine.Random.Range(0, TierOres[tier].Length)]);
-
-                // 25% gem
-                if (tier < TierGems.Length && TierGems[tier].Length > 0 &&
-                    UnityEngine.Random.value <= 0.25f)
-                    GiveBonus(inv, TierGems[tier][UnityEngine.Random.Range(0, TierGems[tier].Length)]);
-
-                // 15% refined metal (tier 2+)
-                if (tier >= 2 && tier < TierMetals.Length && TierMetals[tier].Length > 0 &&
-                    UnityEngine.Random.value <= 0.15f)
-                    GiveBonus(inv, TierMetals[tier][UnityEngine.Random.Range(0, TierMetals[tier].Length)]);
-
-                // 5% endgame (tier 5)
-                if (tier >= 5 && UnityEngine.Random.value <= 0.05f)
-                    GiveBonus(inv, EndgameMining[UnityEngine.Random.Range(0, EndgameMining.Length)]);
-            }
-            catch { }
-        }
-
-        private static void GiveBonus(Inventory inv, string name)
-        {
-            var item = Items.ItemFactory.GetItem(name);
-            if (item == null) return;
-            if (!inv.AddItemToInv(item)) inv.ForceItemToInv(item);
-            ChatHelper.Send($"<color=#FFD700>[Mining]</color> Bonus find: <color=#FFFFFF>{name}</color>!");
         }
     }
 
@@ -1068,14 +1052,36 @@ namespace ErenshorSkills.Patches
                 var item = Items.ItemFactory.GetItem(drop);
                 if (item == null) return;
                 var inv = GameData.PlayerInv;
-                if (inv != null)
+                if (inv == null || !Items.ItemFactory.CanAddItemToPlayer(item, 1))
                 {
-                    if (!inv.AddItemToInv(item))
-                        inv.ForceItemToInv(item);
+                    ChatHelper.Send("<color=#EF5350>[Mining]</color> Your inventory is full; the bonus find was left behind.");
+                    return;
                 }
-                ChatHelper.Send($"<color=#FFD700>[Mining]</color> You also find: <color=#FFFFFF>{drop}</color>");
+
+                var mutation = Items.BagSystem.BeginExternalMutation();
+                try
+                {
+                    if (!inv.AddItemToInv(item, 1) ||
+                        !Items.BagSystem.CommitExternalMutation(
+                            "mining-bonus", mutation))
+                        throw new InvalidOperationException(
+                            "The bonus mining item could not be saved.");
+                    ChatHelper.Send($"<color=#FFD700>[Mining]</color> You also find: <color=#FFFFFF>{drop}</color>");
+                }
+                catch (Exception rewardError)
+                {
+                    Items.BagSystem.RollbackExternalMutation(mutation);
+                    SkillsPlugin.Log.LogError(
+                        $"Mining bonus reward rolled back: {rewardError}");
+                    ChatHelper.Send(
+                        "<color=#EF5350>[Mining]</color> The bonus find was not " +
+                        "awarded because it could not be saved safely.");
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning($"Mining bonus patch failed safely: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -1187,6 +1193,7 @@ namespace ErenshorSkills.Patches
         public static void Prefix(LootTable __instance)
         {
             if (!SkillsSaveManager.HasLoaded) return;
+            if (!LootInjectionGuard.TryMark(__instance, LootInjectionKind.EndgameMaterial)) return;
             try
             {
                 var character = __instance.GetComponent<Character>();
@@ -1237,18 +1244,279 @@ namespace ErenshorSkills.Patches
     [HarmonyPatch(typeof(ItemIcon), "InteractItemSlot")]
     public static class Patch_PreventBagSplit
     {
-        public static bool Prefix(ItemIcon __instance)
+        internal struct ExternalMoveState
         {
+            public Item Item;
+            public int Identity;
+            public ItemIcon Target;
+            public Items.BagSystem.MutationSnapshot Mutation;
+            public bool BankMove;
+            public bool BankWithdrawal;
+            public string BankPath;
+            public string BankBefore;
+            public string BankBagsPath;
+            public string BankBagsBefore;
+            public bool RestoreNoTrade;
+            public bool PreviousNoTrade;
+        }
+
+        private static bool Prefix(ItemIcon __instance, ItemIcon ___SwapWith,
+            ItemIcon ___MouseHomeSlot,
+            out ExternalMoveState __state)
+        {
+            __state = new ExternalMoveState();
             try
             {
                 if (__instance?.MyItem == null) return true;
                 if (!Items.BagSystem.IsBag(__instance.MyItem.ItemName)) return true;
+
                 // If a split key is held, block the interaction entirely
-                if (Input.GetKey(InputManager.SplitOne) || Input.GetKey(InputManager.SplitTen))
+                bool splitOne = Input.GetKey(InputManager.SplitOne);
+                bool splitTen = Input.GetKey(InputManager.SplitTen);
+                if (__instance.BankSlot)
+                {
+                    if (splitOne || splitTen)
+                    {
+                        ChatHelper.Send(
+                            "<color=#EF5350>[Bag]</color> Bags cannot be split " +
+                            "or quick-withdrawn. Drag the bag into an empty " +
+                            "inventory slot.");
+                        return false;
+                    }
+                    // Normal pickup is captured when the cursor is dropped into
+                    // a direct inventory slot. Returning it to a bank slot does
+                    // not change its shared identity.
+                    return true;
+                }
+
+                bool bankOrigin = ___MouseHomeSlot != null &&
+                    ___MouseHomeSlot.BankSlot;
+                if (bankOrigin)
+                {
+                    if (___SwapWith != null && ___SwapWith.BankSlot)
+                        return true;
+                    if (___SwapWith != null &&
+                        Items.BagSystem.IsDirectInventorySlot(___SwapWith))
+                    {
+                        if (___SwapWith.MyItem != null &&
+                            ___SwapWith.MyItem != GameData.PlayerInv.Empty)
+                        {
+                            ChatHelper.Send(
+                                "<color=#EF5350>[Bag]</color> Withdraw a banked " +
+                                "bag into an empty inventory slot.");
+                            return false;
+                        }
+                        return CaptureBankWithdrawal(__instance, ___SwapWith,
+                            ___MouseHomeSlot, ref __state);
+                    }
+                    Items.BagTransferSafety.SendBankRouteBlocked();
                     return false;
+                }
+
+                if (splitOne || splitTen)
+                {
+                    if (splitTen && !splitOne && GameData.VendorWindowOpen)
+                    {
+                        Items.BagTransferSafety.TryHandleVendorBagSale(
+                            GameData.VendorWindow, __instance);
+                        return false;
+                    }
+                    ChatHelper.Send(
+                        "<color=#EF5350>[Bag]</color> Bags cannot be split or " +
+                        "quick-banked. Drag the bag into an empty bank slot.");
+                    return false;
+                }
+
+                if (___SwapWith != null && ___SwapWith.BankSlot)
+                {
+                    if (___SwapWith.MyItem != null &&
+                        ___SwapWith.MyItem != GameData.PlayerInv.Empty)
+                    {
+                        ChatHelper.Send(
+                            "<color=#EF5350>[Bag]</color> Put the bag in an " +
+                            "empty bank slot.");
+                        return false;
+                    }
+                    if (!Items.BagTransferSafety.CanBank(__instance))
+                        return false;
+                    return CaptureExternalMove(__instance, ___SwapWith, true,
+                        ref __state);
+                }
+                if (___SwapWith != null && ___SwapWith.TrashSlot)
+                {
+                    if (!Items.BagTransferSafety.CanExternalize(__instance))
+                        return false;
+                    if (!CaptureExternalMove(__instance, ___SwapWith, false,
+                        ref __state)) return false;
+                    __state.RestoreNoTrade = true;
+                    __state.PreviousNoTrade =
+                        __instance.MyItem.NoTradeNoDestroy;
+                    __instance.MyItem.NoTradeNoDestroy = false;
+                    return true;
+                }
+                if (___SwapWith != null &&
+                    (___SwapWith.LootSlot || ___SwapWith.VendorSlot ||
+                     ___SwapWith.NotInInventory))
+                {
+                    Items.BagTransferSafety.SendTradeBlocked();
+                    return false;
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning($"Bag move protection failed closed: {ex.Message}");
+                return false;
+            }
             return true;
+        }
+
+        private static void Postfix(ExternalMoveState __state)
+        {
+            if (__state.RestoreNoTrade && __state.Item != null)
+                __state.Item.NoTradeNoDestroy =
+                    __state.PreviousNoTrade;
+            if (__state.Item == null || __state.Mutation == null) return;
+            try
+            {
+                ItemIcon target = __state.Target;
+                if (__state.BankMove && target == null &&
+                    __state.BankWithdrawal)
+                {
+                    if (GameData.PlayerInv?.StoredSlots != null)
+                        foreach (ItemIcon candidate in
+                            GameData.PlayerInv.StoredSlots)
+                            if (Items.BagSystem.IsDirectInventorySlot(candidate) &&
+                                candidate.MyItem == __state.Item &&
+                                candidate.Quantity == __state.Identity)
+                            {
+                                target = candidate;
+                                break;
+                            }
+                }
+                else if (__state.BankMove && target == null &&
+                    GameData.BankUI?.Bank?.BankSlots != null)
+                {
+                    foreach (ItemIcon candidate in
+                        GameData.BankUI.Bank.BankSlots)
+                        if (candidate?.MyItem == __state.Item &&
+                            candidate.Quantity == __state.Identity)
+                        {
+                            target = candidate;
+                            break;
+                        }
+                }
+                if (__state.BankWithdrawal)
+                    Items.BagTransferSafety.FinalizeBankWithdrawal(
+                        __state.Item, __state.Identity, target,
+                        __state.Mutation, __state.BankPath,
+                        __state.BankBefore, __state.BankBagsPath,
+                        __state.BankBagsBefore);
+                else if (__state.BankMove)
+                    Items.BagTransferSafety.FinalizeBankDeposit(
+                        __state.Item, __state.Identity, target,
+                        __state.Mutation, __state.BankPath,
+                        __state.BankBefore, __state.BankBagsPath,
+                        __state.BankBagsBefore);
+                else
+                    Items.BagTransferSafety.FinalizeExternalMove(
+                        __state.Item, __state.Identity, target,
+                        __state.Mutation, false, null, null);
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogError(
+                    $"Bag external move finalization failed: {ex.Message}");
+                Items.BagSystem.RollbackExternalMutation(
+                    __state.Mutation,
+                    __state.BankMove ? __state.BankPath : null,
+                    __state.BankMove ? __state.BankBefore : null,
+                    __state.BankMove ? __state.BankBagsPath : null,
+                    __state.BankMove ? __state.BankBagsBefore : null);
+                Items.BagSystem.ClearCursorAfterExternalRollback();
+                ReloadBankAfterRollback(__state.BankMove);
+            }
+        }
+
+        private static Exception Finalizer(Exception __exception,
+            ExternalMoveState __state)
+        {
+            if (__state.RestoreNoTrade && __state.Item != null)
+                __state.Item.NoTradeNoDestroy =
+                    __state.PreviousNoTrade;
+            if (__exception != null && __state.Mutation != null)
+            {
+                Items.BagSystem.RollbackExternalMutation(
+                    __state.Mutation,
+                    __state.BankMove ? __state.BankPath : null,
+                    __state.BankMove ? __state.BankBefore : null,
+                    __state.BankMove ? __state.BankBagsPath : null,
+                    __state.BankMove ? __state.BankBagsBefore : null);
+                Items.BagSystem.ClearCursorAfterExternalRollback();
+                ReloadBankAfterRollback(__state.BankMove);
+            }
+            return __exception;
+        }
+
+        private static bool CaptureExternalMove(ItemIcon source,
+            ItemIcon target, bool bankMove, ref ExternalMoveState state)
+        {
+            state.Item = source.MyItem;
+            state.Identity = Mathf.Max(1, source.Quantity);
+            state.Target = target;
+            state.Mutation =
+                Items.BagSystem.BeginExternalBagMove(source);
+            state.BankMove = bankMove;
+            if (!bankMove) return true;
+            state.BankPath = Items.BagTransferSafety.GetBankPath();
+            state.BankBefore = Items.BagTransferSafety.BuildBankJson(
+                GameData.BankUI?.Bank);
+            if (!Items.BagTransferSafety.TryCaptureSharedBankState(
+                out state.BankBagsPath, out state.BankBagsBefore))
+            {
+                state = new ExternalMoveState();
+                return false;
+            }
+            return true;
+        }
+
+        private static bool CaptureBankWithdrawal(ItemIcon source,
+            ItemIcon target, ItemIcon bankHome,
+            ref ExternalMoveState state)
+        {
+            if (!Items.BagTransferSafety.TryCaptureSharedBankState(
+                out string bankBagsPath, out string bankBagsBefore))
+                return false;
+            Item item = source.MyItem;
+            int identity = Mathf.Max(1, source.Quantity);
+            if (!Items.BagTransferSafety.CanWithdrawBankBag(
+                item, identity, bankBagsBefore, out string reason))
+            {
+                Items.BagTransferSafety.SendBlocked(reason);
+                return false;
+            }
+            state.Item = item;
+            state.Identity = identity;
+            state.Target = target;
+            state.Mutation = Items.BagSystem.BeginExternalMutation();
+            state.BankMove = true;
+            state.BankWithdrawal = true;
+            state.BankPath = Items.BagTransferSafety.GetBankPath();
+            state.BankBefore = Items.BagTransferSafety.BuildBankJson(
+                GameData.BankUI?.Bank, bankHome, item, identity);
+            state.BankBagsPath = bankBagsPath;
+            state.BankBagsBefore = bankBagsBefore;
+            return true;
+        }
+
+        private static void ReloadBankAfterRollback(bool bankMove)
+        {
+            if (!bankMove || GameData.BankUI?.Bank == null) return;
+            try { GameData.BankUI.Bank.LoadBank(); }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogError(
+                    $"Bag bank UI rollback failed: {ex.Message}");
+            }
         }
     }
 
@@ -1268,13 +1536,46 @@ namespace ErenshorSkills.Patches
         {
             try
             {
+                // Native OnPointerUp immediately dereferences MyItem and its
+                // Classes collection. Equipment removal and interrupted cursor
+                // moves can briefly leave either field null, turning every
+                // subsequent inventory click into a NullReferenceException.
+                // Normalize those transient empty-slot states before any
+                // add-on or native interaction logic runs.
+                Inventory inventory = GameData.PlayerInv;
+                NormalizeItemSlot(__instance, inventory);
+                NormalizeItemSlot(GameData.MouseSlot, inventory);
+                NormalizeItemSlot(GameData.ItemOnCursor, inventory);
+
+                // True press-drag from a direct inventory slot into any crafted
+                // bag cell. Handle this before Erenshor converts the source into
+                // its click-to-cursor state.
+                if (eventData.button ==
+                        UnityEngine.EventSystems.PointerEventData.InputButton.Left &&
+                    Items.BagWindow.AnyOpen &&
+                    Items.BagSystem.IsDirectInventorySlot(__instance) &&
+                    __instance.MyItem != null &&
+                    __instance.MyItem != GameData.PlayerInv.Empty &&
+                    !Items.BagSystem.IsBag(__instance.MyItem) &&
+                    Items.BagWindow.TryHandleInventoryDragDrop(
+                        __instance, eventData.position))
+                    return false;
+
                 // Only intercept right-clicks
                 if (eventData.button != UnityEngine.EventSystems.PointerEventData.InputButton.Right)
                     return true;
                 // Only when bag window is open
                 if (!Items.BagWindow.AnyOpen) return true;
-                // Only for inventory slots (not vendor, loot, equipment)
-                if (__instance.VendorSlot || __instance.LootSlot) return true;
+                // Let Erenshor finish an existing drag instead of mutating a
+                // second slot and leaving the mouse cursor in a stuck state.
+                if (GameData.ItemOnCursor != null ||
+                    (GameData.MouseSlot != null && GameData.MouseSlot.dragging))
+                    return true;
+                // Only direct character inventory participates in the bag
+                // transaction. In particular, never clear a global-bank slot.
+                if (__instance.VendorSlot || __instance.LootSlot ||
+                    __instance.BankSlot || __instance.TrashSlot ||
+                    __instance.MouseSlot || __instance.NotInInventory) return true;
                 // Skip empty slots
                 if (__instance.MyItem == null || __instance.MyItem == GameData.PlayerInv.Empty)
                     return true;
@@ -1292,6 +1593,20 @@ namespace ErenshorSkills.Patches
             catch { }
             return true;
         }
+
+        private static void NormalizeItemSlot(ItemIcon slot,
+            Inventory inventory)
+        {
+            if (slot == null || inventory?.Empty == null) return;
+            if (slot.MyItem == null)
+            {
+                slot.MyItem = inventory.Empty;
+                slot.Quantity = 1;
+                try { slot.UpdateSlotImage(); } catch { }
+            }
+            if (slot.MyItem?.Classes == null)
+                slot.MyItem.Classes = new List<Class>();
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1305,102 +1620,116 @@ namespace ErenshorSkills.Patches
     [HarmonyPatch(typeof(ItemIcon), "UseConsumable")]
     public static class Patch_FoodToleranceXP
     {
-        public static void Postfix(ItemIcon __instance)
+        public struct ConsumptionState
+        {
+            public Item Item;
+            public string Name;
+            public int Quantity;
+        }
+
+        [HarmonyPriority(Priority.First)]
+        public static void Prefix(ItemIcon __instance, out ConsumptionState __state)
+        {
+            __state = new ConsumptionState();
+            try
+            {
+                var item = __instance?.MyItem;
+                if (item == null || item == GameData.PlayerInv?.Empty ||
+                    item.ItemEffectOnClick == null || Items.BagSystem.IsBag(item) ||
+                    Stations.RecipeVendors.IsRecipeScroll(item)) return;
+                __state.Item = item;
+                __state.Name = item.ItemName;
+                __state.Quantity = Mathf.Max(1, __instance.Quantity);
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning($"Could not capture consumable state: {ex.Message}");
+            }
+        }
+
+        public static void Postfix(ItemIcon __instance, ConsumptionState __state)
         {
             try
             {
-                if (!SkillsSaveManager.HasLoaded) return;
-                var item = __instance.MyItem;
-                if (item == null || item.ItemEffectOnClick == null) return;
-                // Skip bags
-                if (Items.BagSystem.IsBag(item.ItemName)) return;
+                if (!SkillsSaveManager.HasLoaded ||
+                    !SkillsPlugin.CfgEnableFoodTolerance.Value || __state.Item == null) return;
 
-                Skills.FoodToleranceSkill.OnConsumeItem(item.ItemName);
+                // Award XP only if the original invocation actually consumed one.
+                // Reading MyItem only in Postfix loses the last item in a stack and
+                // used to award XP even when casting/range checks rejected the use.
+                bool consumed = !ReferenceEquals(__instance?.MyItem, __state.Item) ||
+                    (__instance != null && __instance.Quantity < __state.Quantity);
+                if (consumed)
+                    Skills.FoodToleranceSkill.OnConsumeItem(__state.Name);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning($"Food Tolerance XP check failed: {ex.Message}");
+            }
         }
     }
 
     /// <summary>
-    /// Extend buff duration based on Food Tolerance skill.
-    /// Only applies to beneficial self-buffs (food/drink effects).
-    /// Hooks AddStatusEffect with the duration parameter.
-    /// </summary>
-    [HarmonyPatch(typeof(Stats), "AddStatusEffect",
-        new System.Type[] { typeof(Spell), typeof(bool), typeof(int), typeof(Character), typeof(float) })]
-    public static class Patch_FoodToleranceDuration
-    {
-        public static void Prefix(Stats __instance, Spell spell, bool _fromPlayer,
-            ref float _duration)
-        {
-            try
-            {
-                if (!SkillsSaveManager.HasLoaded) return;
-                // Only modify player's own buffs
-                if (__instance.Myself == null || __instance.Myself.isNPC) return;
-                if (spell == null) return;
-                // Only extend self-targeted beneficial buffs (food/drink effects)
-                // Don't filter on SpellType — game food may use Misc, StatusEffect, etc.
-                if (!spell.SelfOnly && !spell.InflictOnSelf) return;
-                // Skip damage spells
-                if (spell.Type == Spell.SpellType.Damage || spell.Type == Spell.SpellType.AE
-                    || spell.Type == Spell.SpellType.PBAE) return;
-
-                float bonus = Skills.FoodToleranceSkill.DurationBonus;
-                if (bonus > 0f)
-                {
-                    float mult = 1f + bonus / 100f;
-                    _duration = _duration * mult;
-                }
-            }
-            catch { }
-        }
-    }
-
-    /// <summary>
-    /// Hook the 4-parameter AddStatusEffect which is what the spell system
-    /// actually calls for food/drink buffs. Temporarily increase
-    /// spell.SpellDurationInTicks, then restore in Postfix.
+    /// Adjust only the exact status-effect slot successfully returned by the
+    /// game's four-argument path. This avoids mutating a shared Spell asset and
+    /// is safe under exceptions, nested effects, and re-entrant casts.
     /// </summary>
     [HarmonyPatch(typeof(Stats), "AddStatusEffect",
         new System.Type[] { typeof(Spell), typeof(bool), typeof(int), typeof(Character) })]
     public static class Patch_FoodToleranceDuration4
     {
-        private static int _savedDuration = -1;
-        private static Spell _savedSpell = null;
-
-        public static void Prefix(Stats __instance, Spell spell)
+        public static void Prefix(Spell spell, bool _fromPlayer,
+            Character _specificCaster, ref int _dmgBonus)
         {
             try
             {
-                if (!SkillsSaveManager.HasLoaded) return;
-                if (__instance.Myself == null || __instance.Myself.isNPC) return;
-                if (spell == null) return;
-                if (!spell.SelfOnly && !spell.InflictOnSelf) return;
-                if (spell.Type == Spell.SpellType.Damage || spell.Type == Spell.SpellType.AE
-                    || spell.Type == Spell.SpellType.PBAE) return;
+                if (!_fromPlayer || spell == null || spell.TargetDamage <= 0 ||
+                    _specificCaster != GameData.PlayerControl?.Myself ||
+                    Skills.MagicSkills.ClassifySpell(spell) !=
+                        Skills.MagicSkills.MagicSchool.Conjuration) return;
 
-                float bonus = Skills.FoodToleranceSkill.DurationBonus;
-                if (bonus > 0f)
-                {
-                    float mult = 1f + bonus / 100f;
-                    _savedSpell = spell;
-                    _savedDuration = spell.SpellDurationInTicks;
-                    spell.SpellDurationInTicks = Mathf.RoundToInt(
-                        spell.SpellDurationInTicks * mult);
-                }
+                float multiplier = Skills.MagicSkills.GetConjurationMultiplier();
+                if (multiplier <= 1f) return;
+
+                int totalDamage = Mathf.Max(0, spell.TargetDamage + _dmgBonus);
+                int scaledDamage = Mathf.RoundToInt(totalDamage * multiplier);
+                _dmgBonus = Mathf.Max(0, scaledDamage - spell.TargetDamage);
             }
             catch { }
         }
 
-        public static void Postfix()
+        public static void Postfix(Stats __instance, Spell spell, bool _fromPlayer,
+            Character _specificCaster, int __result)
         {
-            // Restore original duration so the spell ScriptableObject isn't permanently modified
-            if (_savedSpell != null && _savedDuration >= 0)
+            try
             {
-                _savedSpell.SpellDurationInTicks = _savedDuration;
-                _savedSpell = null;
-                _savedDuration = -1;
+                if (!SkillsSaveManager.HasLoaded || spell == null || __result < 0 ||
+                    __instance?.StatusEffects == null ||
+                    __result >= __instance.StatusEffects.Length) return;
+                var applied = __instance.StatusEffects[__result];
+                if (applied == null || applied.Effect != spell) return;
+
+                float multiplier = 1f;
+                bool consumable = Items.ItemFactory.IsConsumableSpell(spell);
+                if (consumable)
+                {
+                    if (!SkillsPlugin.CfgEnableFoodTolerance.Value ||
+                        __instance.Myself == null || __instance.Myself.isNPC) return;
+                    multiplier = 1f + Skills.FoodToleranceSkill.DurationBonus / 100f;
+                }
+                else if (_fromPlayer && _specificCaster == GameData.PlayerControl?.Myself &&
+                    Skills.MagicSkills.ClassifySpell(spell) ==
+                        Skills.MagicSkills.MagicSchool.Abjuration)
+                {
+                    multiplier = Skills.MagicSkills.GetBuffDurationMultiplier();
+                }
+
+                if (multiplier > 1f)
+                    applied.Duration = Mathf.RoundToInt(applied.Duration * multiplier);
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning($"Status duration adjustment failed: {ex.Message}");
             }
         }
     }
@@ -1422,47 +1751,156 @@ namespace ErenshorSkills.Patches
         {
             try
             {
-                if (item == null) return;
-                string extra = "";
+                if (item == null || __instance?.Lore == null) return;
+                Items.NativeConsumableCompatibility
+                    .AppendCustomClassesToTooltip(__instance, item);
+                string lore = __instance.Lore.text ?? "";
+
+                // Recipe scroll — show Learned/Unlearned status
+                if (Stations.RecipeVendors.IsRecipeScroll(item))
+                {
+                    string recipeName = item.ItemName.Substring(8); // Remove "Recipe: "
+                    if (SkillsSaveManager.HasLoaded &&
+                        SkillsSaveManager.Data.IsRecipeKnown(recipeName))
+                        lore = AppendVisibleLineOnce(lore, "[Already Learned]",
+                            "<color=#888888>[Already Learned]</color>");
+                    else
+                        lore = AppendVisibleLineOnce(lore, "[Right-click to Learn]",
+                            "<color=#00FF00>[Right-click to Learn]</color>");
+                }
 
                 // 1. Food/Drink category — already in Lore at registration, skip duplicate
 
-                // 2. Weapon skill type for ANY weapon (game or custom)
-                // Check WeaponDmg OR WeaponDly OR RequiredSlot is Primary/Secondary
+                // 2. Weapon skill type for ANY weapon (game or custom).
+                // Use the item's own flags; currently equipped gear must not
+                // change a hovered item's classification.
                 bool isWeapon = item.WeaponDmg > 0 || item.WeaponDly > 0 ||
-                    item.RequiredSlot == Item.SlotType.Primary ||
-                    item.RequiredSlot == Item.SlotType.Secondary;
+                    item.IsBow || item.IsWand ||
+                    item.ThisWeaponType != Item.WeaponType.None;
                 if (isWeapon)
                 {
-                    // Determine if 2-handed by checking the inventory state or item name
-                    bool isTwoHand = false;
-                    try { isTwoHand = GameData.PlayerInv != null && GameData.PlayerInv.TwoHandPrimary; }
-                    catch { }
-                    // Also check common 2H indicators in the name
-                    string lower = item.ItemName.ToLower();
-                    if (lower.Contains("great") || lower.Contains("staff") ||
+                    string lower = (item.ItemName ?? "").ToLowerInvariant();
+                    bool isTwoHand =
+                        item.ThisWeaponType == Item.WeaponType.TwoHandMelee ||
+                        item.ThisWeaponType == Item.WeaponType.TwoHandStaff ||
+                        item.ThisWeaponType == Item.WeaponType.TwoHandBow ||
+                        lower.Contains("great") || lower.Contains("staff") ||
                         lower.Contains("halberd") || lower.Contains("claymore") ||
                         lower.Contains("maul") || lower.Contains("pole") ||
                         lower.Contains("totem") || lower.Contains("warbow") ||
-                        lower.Contains("longbow"))
-                        isTwoHand = true;
+                        lower.Contains("longbow");
 
                     var wtype = Skills.CombatSkills.ClassifyWeapon(
-                        item.ItemName, isTwoHand);
+                        item, isTwoHand);
                     if (wtype != Skills.CombatSkills.WeaponType.Unknown)
                     {
                         string typeName = Skills.CombatSkills.GetTypeName(wtype);
-                        extra += $"\n<color=#FF9800>Skill: {typeName}</color>";
+                        string visible = $"Skill: {typeName}";
+                        AppendWeaponSkillInfo(__instance, visible);
                     }
                 }
 
-                // Append to Lore text if we have extra info
-                if (!string.IsNullOrEmpty(extra))
-                {
-                    __instance.Lore.text += extra;
-                }
+                __instance.Lore.text = lore;
+                Items.NativeConsumableCompatibility
+                    .FitTooltipText(__instance.Lore);
             }
             catch { }
+        }
+
+        /// <summary>
+        /// Weapon proficiency belongs beside Erenshor's native Base DPS line,
+        /// not inside item lore. Keeping generated stats out of Lore prevents
+        /// them from colliding with authored flavor text on compact tooltips.
+        /// </summary>
+        private static void AppendWeaponSkillInfo(ItemInfoWindow window,
+            string visible)
+        {
+            if (window?.OtherTextParent == null ||
+                string.IsNullOrWhiteSpace(visible))
+                return;
+            var text = window.OtherTextParent
+                .GetComponent<TMPro.TextMeshProUGUI>();
+            if (text == null)
+                text = window.OtherTextParent
+                    .GetComponentInChildren<TMPro.TextMeshProUGUI>(true);
+            if (text == null) return;
+            window.OtherTextParent.SetActive(true);
+            // Native lays this label out for exactly one line ("Base DPS: N")
+            // and anchors it so extra lines grow back over the lore above.
+            // Shrinking the text does not help because it is the block height
+            // that collides, so extend the existing line sideways instead of
+            // starting a new one.
+            string current = text.text ?? "";
+            // Substring rather than whole-line: the proficiency now shares a
+            // line with Base DPS, so a line-equality test would never match and
+            // it would be re-appended on every DisplayItem call.
+            if (!ContainsVisibleText(current, visible))
+            {
+                string rich = $"<color=#FF9800>{visible}</color>";
+                text.text = string.IsNullOrWhiteSpace(current)
+                    ? rich
+                    : current.TrimEnd('\r', '\n') + "   " + rich;
+            }
+            Items.NativeConsumableCompatibility.FitTooltipText(text);
+        }
+
+        /// <summary>
+        /// Adds a generated tooltip line only when the same visible line is not
+        /// already present. Rich-text colors may be rebuilt or stripped by the
+        /// game between DisplayItem calls, so compare rendered text, not markup.
+        /// </summary>
+        public static string AppendVisibleLineOnce(string current,
+            string visibleLine, string richLine)
+        {
+            string text = current ?? "";
+            if (string.IsNullOrWhiteSpace(visibleLine) ||
+                string.IsNullOrWhiteSpace(richLine) ||
+                ContainsVisibleLine(text, visibleLine))
+                return text;
+            return text + "\n" + richLine;
+        }
+
+        /// <summary>
+        /// True when the rendered text already contains this fragment anywhere,
+        /// ignoring rich-text markup. Used for generated text that shares a
+        /// line with native content.
+        /// </summary>
+        public static bool ContainsVisibleText(string text, string fragment)
+        {
+            if (string.IsNullOrEmpty(text) || string.IsNullOrWhiteSpace(fragment))
+                return false;
+            return StripRichText(text).IndexOf(fragment.Trim(),
+                StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        public static bool ContainsVisibleLine(string text, string visibleLine)
+        {
+            if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(visibleLine))
+                return false;
+            string[] lines = text.Replace("\r\n", "\n").Replace('\r', '\n')
+                .Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+            {
+                if (string.Equals(StripRichText(lines[i]).Trim(),
+                    visibleLine.Trim(), StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        public static string StripRichText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text ?? "";
+            var visible = new System.Text.StringBuilder(text.Length);
+            bool inTag = false;
+            for (int i = 0; i < text.Length; i++)
+            {
+                char ch = text[i];
+                if (ch == '<') { inTag = true; continue; }
+                if (ch == '>' && inTag) { inTag = false; continue; }
+                if (!inTag) visible.Append(ch);
+            }
+            return visible.ToString();
         }
     }
 
@@ -1480,16 +1918,32 @@ namespace ErenshorSkills.Patches
         public static void Postfix(ItemInfoWindow __instance, Spell AssignedSpell)
         {
             if (!SkillsPlugin.CfgEnableMagicSkills.Value) return;
-            if (AssignedSpell == null) return;
+            if (!ShouldAnnotate(AssignedSpell)) return;
             try
             {
                 var school = Skills.MagicSkills.ClassifySpell(AssignedSpell);
-                if (school == Skills.MagicSkills.MagicSchool.None) return;
-                string tag = GetSchoolTag(school);
                 if (__instance.SpellDetailsDesc != null)
-                    __instance.SpellDetailsDesc.text += "\n" + tag;
+                    __instance.SpellDetailsDesc.text = AppendSchoolTagOnce(
+                        __instance.SpellDetailsDesc.text, school);
             }
             catch { }
+        }
+
+        public static bool ShouldAnnotate(Spell spell)
+        {
+            return spell != null && !Items.ItemFactory.IsConsumableSpell(spell) &&
+                Skills.MagicSkills.ClassifySpell(spell) !=
+                    Skills.MagicSkills.MagicSchool.None;
+        }
+
+        public static string AppendSchoolTagOnce(string current,
+            Skills.MagicSkills.MagicSchool school)
+        {
+            string text = current ?? "";
+            string tag = GetSchoolTag(school);
+            string visible = Patch_TooltipInject.StripRichText(tag).Trim();
+            return Patch_TooltipInject.AppendVisibleLineOnce(
+                text, visible, tag);
         }
 
         public static string GetSchoolTag(Skills.MagicSkills.MagicSchool school)
@@ -1528,9 +1982,9 @@ namespace ErenshorSkills.Patches
             {
                 var school = Skills.MagicSkills.ClassifySpell(__instance.AssignedSpell);
                 if (school == Skills.MagicSkills.MagicSchool.None) return;
-                string tag = Patch_SpellTooltip.GetSchoolTag(school);
                 if (__instance.Desc != null)
-                    __instance.Desc.text += "\n" + tag;
+                    __instance.Desc.text = Patch_SpellTooltip.AppendSchoolTagOnce(
+                        __instance.Desc.text, school);
             }
             catch { }
         }
@@ -1555,9 +2009,9 @@ namespace ErenshorSkills.Patches
 
                 var school = Skills.MagicSkills.ClassifySpell(__instance.AssignedSpell);
                 if (school == Skills.MagicSkills.MagicSchool.None) return;
-                string tag = Patch_SpellTooltip.GetSchoolTag(school);
                 if (GameData.Misc?.SpellDesc != null)
-                    GameData.Misc.SpellDesc.text += "\n" + tag;
+                    GameData.Misc.SpellDesc.text = Patch_SpellTooltip.AppendSchoolTagOnce(
+                        GameData.Misc.SpellDesc.text, school);
             }
             catch { }
         }
@@ -1569,6 +2023,7 @@ namespace ErenshorSkills.Patches
     /// <summary>
     /// Add chat commands for all skills:
     /// /skills - Overview of all skill levels
+    /// /extrasettings or /logcolors - Open the standalone addon settings book
     /// /fishskill, /foraging, /swimming, etc. - Individual skill info
     /// /forage - Attempt to forage (alias for keybind)
     /// /bindwound - Attempt to bind wounds
@@ -1588,8 +2043,30 @@ namespace ErenshorSkills.Patches
                 string raw = __instance.typed.text;
 
                 if (string.IsNullOrEmpty(raw)) return true;
-                string cmd = raw.Trim().ToLower();
+                string cmd = raw.Trim().ToLowerInvariant();
                 if (string.IsNullOrEmpty(cmd)) return true;
+
+                // ── Opt-in exhaustive in-game test harness ───────────
+                if (cmd == "/cstest" || cmd.StartsWith("/cstest ") ||
+                    cmd == "/csitem" || cmd.StartsWith("/csitem "))
+                {
+                    Testing.AddonTestMode.HandleChatCommand(raw);
+                    return false;
+                }
+
+                // ── Opt-in, crash-safe corpse runs ──────────────────
+                if (cmd == "/corpserun" || cmd.StartsWith("/corpserun "))
+                {
+                    Features.CorpseRunSystem.HandleChatCommand(raw);
+                    return false;
+                }
+
+                // ── Standalone Extra Settings book ──────────────────
+                if (cmd == "/extrasettings" || cmd == "/logcolors")
+                {
+                    UI.LogDisplaySettingsUI.Open();
+                    return false;
+                }
 
                 // ── /skills — Master overview ────────────────────────
                 if (cmd == "/skills" || cmd == "/skilllist")
@@ -1601,7 +2078,8 @@ namespace ErenshorSkills.Patches
                 // ── /scanobjects — Debug: list game objects matching keywords ──
                 if (cmd.StartsWith("/scanobjects"))
                 {
-                    string filter = cmd.Length > 13 ? cmd.Substring(13).Trim().ToLower() : "";
+                    if (!RequireDebugCommands()) return false;
+                    string filter = cmd.Length > 13 ? cmd.Substring(13).Trim().ToLowerInvariant() : "";
                     string[] keywords = string.IsNullOrEmpty(filter)
                         ? new[] { "oven", "brew", "brewing", "barrel", "bench", "fire", "loom", "forge" }
                         : new[] { filter };
@@ -1611,7 +2089,7 @@ namespace ErenshorSkills.Patches
                     foreach (var obj in allObjs)
                     {
                         if (obj == null) continue;
-                        string lower = obj.name.ToLower();
+                        string lower = obj.name.ToLowerInvariant();
                         foreach (var kw in keywords)
                         {
                             if (lower.Contains(kw))
@@ -1622,17 +2100,21 @@ namespace ErenshorSkills.Patches
                                     $"<color=#FFFFFF>{obj.name}</color> " +
                                     $"<color=#888888>({pos.x:F1}, {pos.y:F1}, {pos.z:F1})</color>");
                                 count++;
+                                if (count >= 100) break;
                                 break;
                             }
                         }
+                        if (count >= 100) break;
                     }
-                    ChatHelper.Send($"<color=#00FF00>[Scan]</color> Found {count} objects.");
+                    ChatHelper.Send($"<color=#00FF00>[Scan]</color> Found {count}" +
+                        (count >= 100 ? "+ objects (output capped)." : " objects."));
                     return false;
                 }
 
                 // ── /givebag — Debug: give a bag item ───────────────
                 if (cmd.StartsWith("/givebag"))
                 {
+                    if (!RequireDebugCommands()) return false;
                     string bagName = cmd.Length > 9 ? cmd.Substring(9).Trim() : "";
                     if (string.IsNullOrEmpty(bagName))
                     {
@@ -1644,7 +2126,8 @@ namespace ErenshorSkills.Patches
                     string[] bags = { "Silken Pouch", "Herbalist's Satchel", "Simple Backpack", "Adventurer's Backpack" };
                     string matched = null;
                     foreach (var b in bags)
-                        if (b.ToLower().Contains(bagName.ToLower())) { matched = b; break; }
+                        if (b.IndexOf(bagName, StringComparison.OrdinalIgnoreCase) >= 0)
+                        { matched = b; break; }
                     if (matched == null)
                     {
                         ChatHelper.Send($"<color=#FF6666>[Debug]</color> Unknown bag: {bagName}");
@@ -1660,15 +2143,19 @@ namespace ErenshorSkills.Patches
                 // ── /givetp — Debug: grant training points ────────────
                 if (cmd.StartsWith("/givetp"))
                 {
+                    if (!RequireDebugCommands()) return false;
                     string numStr = cmd.Length > 8 ? cmd.Substring(8).Trim() : "10";
                     int amount = 10;
-                    int.TryParse(numStr, out amount);
+                    if (!int.TryParse(numStr, out amount)) amount = 10;
+                    amount = Mathf.Clamp(amount, 1, 1000);
                     // Decrease spent so the recalculation gives more TP
+                    int beforeSpent = SkillsSaveManager.Data.TrainingPointsSpent;
                     SkillsSaveManager.Data.TrainingPointsSpent =
                         Mathf.Max(0, SkillsSaveManager.Data.TrainingPointsSpent - amount);
                     SkillsSaveManager.Data.CheckForNewTrainingPoints();
+                    int refunded = beforeSpent - SkillsSaveManager.Data.TrainingPointsSpent;
                     ChatHelper.Send(
-                        $"<color=#00FF00>[Debug]</color> Granted {amount} training points. " +
+                        $"<color=#00FF00>[Debug]</color> Refunded {refunded} spent training points. " +
                         $"Total: {SkillsSaveManager.Data.TrainingPoints}");
                     SkillsSaveManager.Save();
                     return false;
@@ -1677,23 +2164,32 @@ namespace ErenshorSkills.Patches
                 // ── /learnrecipe — Debug: learn a recipe by name ─────
                 if (cmd.StartsWith("/learnrecipe"))
                 {
+                    if (!RequireDebugCommands()) return false;
                     string rname = cmd.Length > 13 ? cmd.Substring(13).Trim() : "";
                     if (string.IsNullOrEmpty(rname))
                     {
                         ChatHelper.Send("<color=#00FF00>[Debug]</color> Usage: /learnrecipe <recipe name>");
                         return false;
                     }
-                    if (rname.ToLower() == "all")
+                    if (string.Equals(rname, "all", StringComparison.OrdinalIgnoreCase))
                     {
+                        var data = SkillsSaveManager.Data;
+                        var knownBefore = new List<string>(data.KnownRecipes);
                         int learned = 0;
                         string[] tsList = { "Smithing", "Baking", "Brewing", "Fletching", "Jewelcraft", "Tailoring" };
                         foreach (var ts in tsList)
                         {
                             var recipes = Skills.Tradeskills.GetRecipesForSkillPublic(ts);
                             foreach (var r in recipes)
-                                if (SkillsSaveManager.Data.LearnRecipe(r.Name)) learned++;
+                                if (data.LearnRecipe(r.Name)) learned++;
                         }
-                        SkillsSaveManager.SaveRecipesFile();
+                        if (!SkillsSaveManager.SaveRecipesFile())
+                        {
+                            data.KnownRecipes.Clear();
+                            data.KnownRecipes.AddRange(knownBefore);
+                            ChatHelper.Send("<color=#EF5350>[Debug]</color> Recipe unlocks were rolled back because the save failed.");
+                            return false;
+                        }
                         ChatHelper.Send($"<color=#00FF00>[Debug]</color> Learned {learned} new recipes.");
                         return false;
                     }
@@ -1704,11 +2200,17 @@ namespace ErenshorSkills.Patches
                         var recipes = Skills.Tradeskills.GetRecipesForSkillPublic(ts);
                         foreach (var r in recipes)
                         {
-                            if (r.Name.ToLower().Contains(rname.ToLower()))
+                            if (r.Name.IndexOf(rname,
+                                StringComparison.OrdinalIgnoreCase) >= 0)
                             {
                                 if (SkillsSaveManager.Data.LearnRecipe(r.Name))
                                 {
-                                    SkillsSaveManager.SaveRecipesFile();
+                                    if (!SkillsSaveManager.SaveRecipesFile())
+                                    {
+                                        SkillsSaveManager.Data.KnownRecipes.Remove(r.Name);
+                                        ChatHelper.Send("<color=#EF5350>[Debug]</color> The recipe was not learned because the save failed.");
+                                        return false;
+                                    }
                                     ChatHelper.Send($"<color=#FFD700>[Skills]</color> Learned recipe: <color=#FFFFFF>{r.Name}</color> ({ts})");
                                 }
                                 else
@@ -1814,59 +2316,82 @@ namespace ErenshorSkills.Patches
 
                 // ── /dumpdb — Export game databases to CSV ────────
                 if (cmd == "/dumpdb")
-                { DatabaseDumper.DumpAll(); return false; }
+                {
+                    if (!RequireDebugCommands()) return false;
+                    DatabaseDumper.DumpAll(); return false;
+                }
 
                 // ── /iconcheck — List items missing game icons ───────
                 if (cmd == "/iconcheck")
-                { Items.ItemFactory.ReportMissingIcons(); return false; }
+                {
+                    if (!RequireDebugCommands()) return false;
+                    Items.ItemFactory.ReportMissingIcons(); return false;
+                }
 
-                // ── Tradeskill commands — open crafting windows ─────
+                // ── Tradeskill commands — text shortcuts only ─────
                 string[] tradeskillNames = { "Smithing", "Baking", "Brewing",
                     "Fletching", "Jewelcraft", "Tailoring" };
 
                 foreach (var ts in tradeskillNames)
                 {
-                    string prefix = "/" + ts.ToLower();
-                    // /smithing or /smith opens the window
-                    if (cmd == prefix || cmd == prefix.Substring(0, Math.Min(prefix.Length, 6)))
-                    {
-                        UI.TradeskillWindow.Open(ts);
-                        return false;
-                    }
-                    // /smithing list still works for chat-only users
+                    string prefix = "/" + ts.ToLowerInvariant();
+                    // /smithing list — show known recipes in chat
                     if (cmd == prefix + " list")
                     {
                         Skills.Tradeskills.ListRecipes(ts);
                         return false;
                     }
-                    // /smithing make <name> still works as a text shortcut
-                    if (cmd.StartsWith(prefix + " make "))
-                    {
-                        string recipeName = __instance.typed.text.Trim()
-                            .Substring((prefix + " make ").Length).Trim();
-                        Skills.Tradeskills.AttemptCombine(ts, recipeName);
-                        return false;
-                    }
                 }
-
-                // Short aliases: /smith, /bake, /brew, /fletch, /jewel, /tailor
-                if (cmd == "/smith" || cmd == "/forge")
-                { UI.TradeskillWindow.Open("Smithing"); return false; }
-                if (cmd == "/bake" || cmd == "/cook")
-                { UI.TradeskillWindow.Open("Baking"); return false; }
-                if (cmd == "/brew")
-                { UI.TradeskillWindow.Open("Brewing"); return false; }
-                if (cmd == "/fletch")
-                { UI.TradeskillWindow.Open("Fletching"); return false; }
-                if (cmd == "/jewel" || cmd == "/jewelry")
-                { UI.TradeskillWindow.Open("Jewelcraft"); return false; }
-                if (cmd == "/tailor" || cmd == "/sew")
-                { UI.TradeskillWindow.Open("Tailoring"); return false; }
 
                 if (cmd == "/tradeskills" || cmd == "/trades")
                 {
                     ShowTradeskillOverview();
                     return false;
+                }
+
+                // ── /whisper SimName craft ... — SimCraft whisper system ──
+                if (cmd.StartsWith("/whisper "))
+                {
+                    // Parse: /whisper SimName message
+                    // The game parses from char 9 to first space = name, rest = message
+                    string remainder = raw.Substring(8).Trim(); // strip "/whisper "
+                    int spaceIdx = remainder.IndexOf(' ');
+                    if (spaceIdx > 0)
+                    {
+                        string targName = remainder.Substring(0, spaceIdx).Trim();
+                        string whisperMsg = remainder.Substring(spaceIdx + 1).Trim();
+
+                        if (!string.IsNullOrEmpty(targName) && !string.IsNullOrEmpty(whisperMsg))
+                        {
+                            // Find the sim
+                            SimPlayerTracking simTracking = null;
+                            if (GameData.SimMngr != null)
+                            {
+                                foreach (var sim in GameData.SimMngr.Sims)
+                                {
+                                    if (string.Equals(sim.SimName, targName,
+                                        StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        simTracking = sim;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (simTracking != null && !simTracking.IsGMCharacter)
+                            {
+                                if (Skills.SimPlayerTradeskills.TryHandleWhisper(simTracking, whisperMsg))
+                                {
+                                    // Log the outgoing whisper ourselves
+                                    UpdateSocialLog.LogAdd(new ChatLogLine(
+                                        "[WHISPER TO] " + simTracking.SimName + ": " + whisperMsg,
+                                        ChatLogLine.LogType.Whisper, "#FF62D1"));
+                                    return false; // handled, skip game's CheckCommands
+                                }
+                            }
+                        }
+                    }
+                    // Fall through to let game handle it normally
                 }
             }
             catch (Exception ex)
@@ -1874,6 +2399,15 @@ namespace ErenshorSkills.Patches
                 SkillsPlugin.Log.LogError($"Chat command error: {ex}");
             }
             return true;
+        }
+
+        private static bool RequireDebugCommands()
+        {
+            if (SkillsPlugin.CfgEnableDebugCommands?.Value == true) return true;
+            ChatHelper.Send(
+                "<color=#EF5350>[Classic Skills]</color> Debug commands are disabled. " +
+                "Enable Testing.EnableDebugCommands in the config only for controlled testing.");
+            return false;
         }
 
         /// <summary>Gold cost for a recipe based on its trivial level.</summary>
@@ -1988,8 +2522,7 @@ namespace ErenshorSkills.Patches
             }
 
             ChatHelper.Send(
-                $"<color=#AAAAAA>Use /<tradeskill> list to see recipes. " +
-                $"/<tradeskill> make <name> to craft.</color>");
+                $"<color=#AAAAAA>Use /<tradeskill> list to see recipes.</color>");
             ChatHelper.Send(
                 $"<color=#FF9800>═══════════════════</color>");
         }
@@ -2036,20 +2569,37 @@ namespace ErenshorSkills.Patches
         {
             try
             {
-                if (__result <= 0) return; // Don't modify misses
-                if (!SkillsPlugin.CfgEnableCombatSkills.Value) return;
+                if (__result <= 0) return;
 
-                // Only apply to the player, not NPCs
+                // Sim player melee bonus
+                if (__instance.Myself != null && Skills.SimPlayerSkills.IsSimPlayer(__instance.Myself))
+                {
+                    float simMult = Skills.SimPlayerSkills.GetMeleeDamageMultiplier(__instance.Myself);
+                    if (simMult > 1f)
+                        __result = Mathf.RoundToInt(__result * simMult);
+                    return;
+                }
+
+                // Player melee bonus
+                if (!SkillsPlugin.CfgEnableCombatSkills.Value) return;
                 if (__instance.Myself == null) return;
                 var pc = GameData.PlayerControl;
                 if (pc == null || __instance.Myself != pc) return;
 
-                // Get equipped weapon name
-                string weaponName = __instance.MyInv?.MH?.MyItem?.ItemName;
-                if (string.IsNullOrEmpty(weaponName)) return;
-
-                bool isTwoHand = __instance.MyInv != null && __instance.MyInv.TwoHandPrimary;
-                var wtype = Skills.CombatSkills.ClassifyWeapon(weaponName, isTwoHand);
+                bool mainHand = !Patches.Patch_MeleeXP.ContextActive ||
+                    Patches.Patch_MeleeXP.CurrentIsMainHand;
+                Item weapon = mainHand
+                    ? __instance.MyInv?.MH?.MyItem
+                    : __instance.MyInv?.OH?.MyItem;
+                bool unarmed = weapon == null || weapon == GameData.PlayerInv?.Empty ||
+                    string.IsNullOrWhiteSpace(weapon.ItemName) ||
+                    string.Equals(weapon.ItemName, "Empty",
+                        StringComparison.OrdinalIgnoreCase);
+                bool isTwoHand = mainHand && __instance.MyInv != null &&
+                    __instance.MyInv.TwoHandPrimary;
+                var wtype = unarmed
+                    ? Skills.CombatSkills.WeaponType.HandToHand
+                    : Skills.CombatSkills.ClassifyWeapon(weapon, isTwoHand);
                 if (wtype == Skills.CombatSkills.WeaponType.Unknown) return;
 
                 float mult = Skills.CombatSkills.GetDamageMultiplier(wtype);
@@ -2062,6 +2612,7 @@ namespace ErenshorSkills.Patches
 
     /// <summary>
     /// Apply combat skill damage bonus to bow/archery damage calculations.
+    /// Also applies sim player melee bonus (bows are melee-scale for sim purposes).
     /// </summary>
     [HarmonyPatch(typeof(Stats), "CalcBowDamage")]
     public static class Patch_CombatDamageBonus_Bow
@@ -2071,8 +2622,18 @@ namespace ErenshorSkills.Patches
             try
             {
                 if (__result <= 0) return;
-                if (!SkillsPlugin.CfgEnableCombatSkills.Value) return;
 
+                // Sim player bow bonus (uses melee scale since bows are physical)
+                if (__instance.Myself != null && Skills.SimPlayerSkills.IsSimPlayer(__instance.Myself))
+                {
+                    float simMult = Skills.SimPlayerSkills.GetMeleeDamageMultiplier(__instance.Myself);
+                    if (simMult > 1f)
+                        __result = Mathf.RoundToInt(__result * simMult);
+                    return;
+                }
+
+                // Player bow bonus
+                if (!SkillsPlugin.CfgEnableCombatSkills.Value) return;
                 if (__instance.Myself == null) return;
                 var pc = GameData.PlayerControl;
                 if (pc == null || __instance.Myself != pc) return;
@@ -2081,6 +2642,27 @@ namespace ErenshorSkills.Patches
                     Skills.CombatSkills.WeaponType.Archery);
                 if (mult > 1f)
                     __result = Mathf.RoundToInt(__result * mult);
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>Apply the Wands combat skill to the game's final wand calculation.</summary>
+    [HarmonyPatch(typeof(WandBolt), "CalcDmgBonusWand",
+        new System.Type[] { typeof(int), typeof(Character) })]
+    public static class Patch_CombatDamageBonus_Wand
+    {
+        public static void Postfix(Character _caster, ref int __result)
+        {
+            try
+            {
+                if (__result <= 0 || _caster != GameData.PlayerControl?.Myself ||
+                    _caster.MyStats?.MyInv?.MH?.MyItem?.IsWand != true) return;
+
+                float multiplier = Skills.CombatSkills.GetDamageMultiplier(
+                    Skills.CombatSkills.WeaponType.Wands);
+                if (multiplier > 1f)
+                    __result = Mathf.RoundToInt(__result * multiplier);
             }
             catch { }
         }
@@ -2125,44 +2707,253 @@ namespace ErenshorSkills.Patches
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // MAGIC SKILLS — Evocation bonus (spell damage)
+    // MAGIC SKILLS — exact spell context and damage/healing bonuses
     // ═══════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// MagicDamageMe does not receive the originating spell. ResolveSpell is
+    /// synchronous, so preserve the exact spell/caster context for only the
+    /// duration of that call. The stack-safe state also handles nested procs.
+    /// </summary>
+    [HarmonyPatch(typeof(SpellVessel), "ResolveSpell")]
+    public static class Patch_PlayerSpellDamage
+    {
+        public struct ContextState
+        {
+            public Spell PreviousSpell;
+            public CastSpell PreviousSource;
+        }
+
+        [ThreadStatic] internal static Spell CurrentSpell;
+        [ThreadStatic] internal static CastSpell CurrentSource;
+
+        public static void Prefix(Spell ___spell, CastSpell ___SpellSource,
+            out ContextState __state)
+        {
+            __state = new ContextState
+            {
+                PreviousSpell = CurrentSpell,
+                PreviousSource = CurrentSource
+            };
+            CurrentSpell = ___spell;
+            CurrentSource = ___SpellSource;
+        }
+
+        public static void Postfix(ContextState __state)
+        {
+            Restore(__state);
+        }
+
+        public static Exception Finalizer(Exception __exception, ContextState __state)
+        {
+            Restore(__state);
+            return __exception;
+        }
+
+        private static void Restore(ContextState state)
+        {
+            CurrentSpell = state.PreviousSpell;
+            CurrentSource = state.PreviousSource;
+        }
+    }
+
+    /// <summary>
+    /// Apply Conjuration to every positive physical-damage component produced
+    /// by the player's native summoned pet. DamageMe is the shared endpoint for
+    /// pet melee, physical abilities, physical procs, and pet-owned DoT ticks.
+    /// </summary>
+    [HarmonyPatch(typeof(Character), "DamageMe",
+        new System.Type[]
+        {
+            typeof(int), typeof(bool), typeof(GameData.DamageType),
+            typeof(Character), typeof(bool), typeof(bool), typeof(int)
+        })]
+    public static class Patch_ConjurationPetPhysicalDamage
+    {
+        internal static int ApplicationsForTesting { get; private set; }
+        internal static int LastIncomingForTesting { get; private set; }
+        internal static int LastBonusForTesting { get; private set; }
+        internal static int LastScaledIncomingForTesting { get; private set; }
+        internal static int LastScaledBonusForTesting { get; private set; }
+
+        public static void Prefix(ref int _incdmg, Character _attacker,
+            ref int _bonusDmg)
+        {
+            try
+            {
+                if (!Skills.MagicSkills.IsPlayerSummonedPet(_attacker)) return;
+                int incoming = _incdmg;
+                int bonus = _bonusDmg;
+                float multiplier = Skills.MagicSkills
+                    .GetConjurationMultiplier();
+                _incdmg = Skills.MagicSkills.ScalePositiveDamage(
+                    _incdmg, multiplier);
+                _bonusDmg = Skills.MagicSkills.ScalePositiveDamage(
+                    _bonusDmg, multiplier);
+                ApplicationsForTesting++;
+                LastIncomingForTesting = incoming;
+                LastBonusForTesting = bonus;
+                LastScaledIncomingForTesting = _incdmg;
+                LastScaledBonusForTesting = _bonusDmg;
+            }
+            catch { }
+        }
+
+        internal static void ResetProbeForTesting()
+        {
+            ApplicationsForTesting = 0;
+            LastIncomingForTesting = 0;
+            LastBonusForTesting = 0;
+            LastScaledIncomingForTesting = 0;
+            LastScaledBonusForTesting = 0;
+        }
+    }
+
+    /// <summary>
+    /// Marks the window in which Stats.TickEffects applies periodic damage.
+    /// A DoT tick calls Character.DamageMe directly and carries no spell
+    /// context, so without this marker there is no way to tell a tick apart
+    /// from an ordinary melee hit inside the damage patch.
+    /// </summary>
+    [HarmonyPatch(typeof(Stats), "TickEffects")]
+    public static class Patch_ConjurationDotContext
+    {
+        [ThreadStatic] internal static bool Active;
+
+        public static void Prefix(out bool __state)
+        {
+            __state = Active;
+            Active = true;
+        }
+
+        public static void Postfix(bool __state) => Active = __state;
+
+        public static Exception Finalizer(Exception __exception, bool __state)
+        {
+            Active = __state;
+            return __exception;
+        }
+    }
+
+    /// <summary>
+    /// Conjuration covers DoTs as well as pets, but only the pet half was
+    /// wired up. Periodic damage resolves through Stats.TickEffects into
+    /// Character.DamageMe, which neither the Evocation patch (MagicDamageMe
+    /// only) nor the pet patch (summoned attackers only) covers — so a DoT
+    /// caster got no return on the skill for most of their damage.
+    /// </summary>
+    [HarmonyPatch(typeof(Character), "DamageMe",
+        new System.Type[]
+        {
+            typeof(int), typeof(bool), typeof(GameData.DamageType),
+            typeof(Character), typeof(bool), typeof(bool), typeof(int)
+        })]
+    public static class Patch_ConjurationDotDamage
+    {
+        internal static int ApplicationsForTesting { get; private set; }
+        internal static int LastIncomingForTesting { get; private set; }
+        internal static int LastScaledForTesting { get; private set; }
+
+        public static void Prefix(ref int _incdmg, bool _fromPlayer,
+            Character _attacker, ref int _bonusDmg)
+        {
+            try
+            {
+                if (!Patch_ConjurationDotContext.Active || !_fromPlayer ||
+                    _incdmg <= 0 || _attacker == null) return;
+                // Only the player's own afflictions. Pet-attributed damage is
+                // already scaled by Patch_ConjurationPetPhysicalDamage, and
+                // scaling here too would compound it.
+                if (_attacker != GameData.PlayerControl?.Myself) return;
+
+                int incoming = _incdmg;
+                float multiplier = Skills.MagicSkills
+                    .GetConjurationMultiplier();
+                _incdmg = Skills.MagicSkills.ScalePositiveDamage(
+                    _incdmg, multiplier);
+                _bonusDmg = Skills.MagicSkills.ScalePositiveDamage(
+                    _bonusDmg, multiplier);
+                ApplicationsForTesting++;
+                LastIncomingForTesting = incoming;
+                LastScaledForTesting = _incdmg;
+            }
+            catch { }
+        }
+
+        internal static void ResetProbeForTesting()
+        {
+            ApplicationsForTesting = 0;
+            LastIncomingForTesting = 0;
+            LastScaledForTesting = 0;
+        }
+    }
 
     [HarmonyPatch(typeof(Character), "MagicDamageMe")]
     public static class Patch_EvocationDamage
     {
-        public static void Prefix(ref int _dmg, Character _source)
+        internal static int PetApplicationsForTesting { get; private set; }
+        internal static int LastPetIncomingForTesting { get; private set; }
+        internal static int LastPetScaledForTesting { get; private set; }
+
+        public static void Prefix(ref int _dmg, bool _fromPlayer,
+            Character _attacker, ref int _baseDmg)
         {
             try
             {
-                if (_source == null || _source.isNPC) return;
-                if (_source != GameData.PlayerControl?.Myself) return;
-                if (_dmg <= 0) return;
+                if (_attacker == null || _dmg <= 0) return;
 
-                // Determine which magic school applies based on the current/last spell
+                // Pet spells and magical procs are not player CastSpell calls,
+                // so recognize their native ownership before exact-spell logic.
+                if (Skills.MagicSkills.IsPlayerSummonedPet(_attacker))
+                {
+                    int incoming = _dmg;
+                    float petMultiplier = Skills.MagicSkills
+                        .GetConjurationMultiplier();
+                    _dmg = Skills.MagicSkills.ScalePositiveDamage(
+                        _dmg, petMultiplier);
+                    _baseDmg = Skills.MagicSkills.ScalePositiveDamage(
+                        _baseDmg, petMultiplier);
+                    PetApplicationsForTesting++;
+                    LastPetIncomingForTesting = incoming;
+                    LastPetScaledForTesting = _dmg;
+                    return;
+                }
+
+                // Check if attacker is a sim player
+                if (Skills.SimPlayerSkills.IsSimPlayer(_attacker))
+                {
+                    float simMult = Skills.SimPlayerSkills.GetSpellDamageMultiplier(_attacker);
+                    if (simMult > 1f)
+                        _dmg = Mathf.RoundToInt(_dmg * simMult);
+                    return;
+                }
+
+                // Only scale damage produced by this player's exact spell.
+                // Wand and unrelated MagicDamageMe calls have their own paths.
+                if (!_fromPlayer || _attacker != GameData.PlayerControl?.Myself) return;
+                Spell current = Patch_PlayerSpellDamage.CurrentSpell;
+                CastSpell source = Patch_PlayerSpellDamage.CurrentSource;
+                if (current == null || source == null || !source.isPlayer ||
+                    source.MyChar != _attacker) return;
+
                 float mult = 1f;
-                var spells = _source.MySpells;
-                Spell current = null;
-                try { current = spells?.GetCurrentCast(); } catch { }
-
-                if (current != null)
-                {
-                    var school = Skills.MagicSkills.ClassifySpell(current);
-                    if (school == Skills.MagicSkills.MagicSchool.Evocation)
-                        mult = Skills.MagicSkills.GetSpellDamageMultiplier();
-                    else if (school == Skills.MagicSkills.MagicSchool.Conjuration)
-                        mult = Skills.MagicSkills.GetConjurationMultiplier();
-                }
-                else
-                {
-                    // No active cast = DoT tick or proc, use Conjuration
+                var school = Skills.MagicSkills.ClassifySpell(current);
+                if (school == Skills.MagicSkills.MagicSchool.Evocation)
+                    mult = Skills.MagicSkills.GetSpellDamageMultiplier();
+                else if (school == Skills.MagicSkills.MagicSchool.Conjuration)
                     mult = Skills.MagicSkills.GetConjurationMultiplier();
-                }
 
                 if (mult > 1f)
                     _dmg = Mathf.RoundToInt(_dmg * mult);
             }
             catch { }
+        }
+
+        internal static void ResetPetProbeForTesting()
+        {
+            PetApplicationsForTesting = 0;
+            LastPetIncomingForTesting = 0;
+            LastPetScaledForTesting = 0;
         }
     }
 
@@ -2170,28 +2961,103 @@ namespace ErenshorSkills.Patches
     // MAGIC SKILLS — Alteration bonus (heal amount)
     // ═══════════════════════════════════════════════════════════════════
 
-    [HarmonyPatch(typeof(Stats), "HealMe")]
+    [HarmonyPatch(typeof(Stats), "HealMe", new System.Type[] {
+        typeof(Spell), typeof(int), typeof(bool), typeof(bool), typeof(Character) })]
     public static class Patch_AlterationHeal
     {
-        public static void Prefix(ref int _incomingHeal)
+        public static void Prefix(Spell _spell, ref int _amt, Character _source)
         {
             try
             {
-                if (_incomingHeal <= 0) return;
-                // Boost heals when the player is casting a heal spell
-                var playerSpells = GameData.PlayerControl?.Myself?.MySpells;
-                if (playerSpells != null && playerSpells.isCasting())
+                if (_amt <= 0 || _source == null) return;
+
+                // Sim player heals
+                if (Skills.SimPlayerSkills.IsSimPlayer(_source))
                 {
-                    var current = playerSpells.GetCurrentCast();
-                    if (current != null && current.Type == Spell.SpellType.Heal)
-                    {
-                        float mult = Skills.MagicSkills.GetHealMultiplier();
-                        if (mult > 1f)
-                            _incomingHeal = Mathf.RoundToInt(_incomingHeal * mult);
-                    }
+                    float simMult = Skills.SimPlayerSkills.GetHealMultiplier(_source);
+                    if (simMult > 1f)
+                        _amt = Mathf.RoundToInt(_amt * simMult);
+                    return;
                 }
+
+                // Player heals
+                if (_source != GameData.PlayerControl?.Myself ||
+                    Skills.MagicSkills.ClassifySpell(_spell) !=
+                        Skills.MagicSkills.MagicSchool.Alteration) return;
+                float mult = Skills.MagicSkills.GetHealMultiplier();
+                if (mult > 1f)
+                    _amt = Mathf.RoundToInt(_amt * mult);
             }
             catch { }
         }
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Intercept whispers to sim players for craft requests
+    // ═════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Postfix on UpdateSocialLog.LogAdd — intercepts WTB chat messages
+    /// to track them in our WTB system so players can whisper to sell.
+    /// </summary>
+    [HarmonyPatch(typeof(UpdateSocialLog), "LogAdd", new System.Type[] { typeof(ChatLogLine) })]
+    public static class Patch_SimWTBTracker
+    {
+        public static void Postfix(ChatLogLine _logLine)
+        {
+            try
+            {
+                if (!SkillsPlugin.CfgEnableSimWTB.Value) return;
+                if (_logLine == null) return;
+                if (_logLine.MyLogType != ChatLogLine.LogType.WTB) return;
+
+                // Parse: "SimName shouts: WTB ItemName, offering X gold. Open a trade with me."
+                string text = _logLine.MyChatString ?? "";
+                int shoutsIdx = text.IndexOf(" shouts: WTB ");
+                if (shoutsIdx < 0) return;
+
+                string simName = text.Substring(0, shoutsIdx);
+                string remainder = text.Substring(shoutsIdx + 13); // after " shouts: WTB "
+
+                // remainder = "ItemName, offering X gold. Open a trade with me."
+                int commaIdx = remainder.IndexOf(", offering ");
+                if (commaIdx < 0) return;
+
+                string itemName = remainder.Substring(0, commaIdx);
+                string goldPart = remainder.Substring(commaIdx + 11); // after ", offering "
+
+                int goldSpaceIdx = goldPart.IndexOf(' ');
+                if (goldSpaceIdx < 0) return;
+                string goldStr = goldPart.Substring(0, goldSpaceIdx);
+
+                int goldPrice;
+                if (!int.TryParse(goldStr, out goldPrice)) return;
+
+                Skills.SimPlayerTradeskills.OnSimWTBShout(simName, itemName, goldPrice);
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>
+    /// Prefix on SimTradeWindow.CompleteTrade — intercepts recipe scroll
+    /// trades to teach sims new recipes.
+    /// </summary>
+    [HarmonyPatch(typeof(SimTradeWindow), "CompleteTrade")]
+    public static class Patch_SimRecipeTrade
+    {
+        public static bool Prefix(SimTradeWindow __instance)
+        {
+            try
+            {
+                if (Skills.SimPlayerTradeskills.TryHandleWTBTrade(__instance))
+                    return false;
+                if (Skills.SimPlayerTradeskills.TryHandleRecipeTrade(__instance))
+                    return false; // we handled it, skip default CompleteTrade
+            }
+            catch { }
+            return true; // normal trade, let game handle it
+        }
+    }
+
 }

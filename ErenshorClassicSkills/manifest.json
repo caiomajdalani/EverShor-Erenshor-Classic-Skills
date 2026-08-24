@@ -1,8 +1,8 @@
 {
     "name": "ErenshorClassicSkills",
-    "version_number": "1.0.0",
-    "website_url": "https://github.com/yourusername/ErenshorClassicSkills",
-    "description": "Adds 9 EverQuest-inspired leveling skills to Erenshor: Fishing, Foraging, Swimming, Sense Heading, Bind Wound, Meditate, Safe Fall, Alcohol Tolerance, and Begging. Each skill levels 1-50 with tangible bonuses.",
+    "version_number": "1.8.1",
+    "website_url": "",
+    "description": "Adds 25 EverQuest-inspired skills, six tradeskills, 280 recipes, safe bags and corpse runs, plus balanced playable Necromancer and Monk classes.",
     "dependencies": [
         "BepInEx-BepInExPack-5.4.2304"
     ]

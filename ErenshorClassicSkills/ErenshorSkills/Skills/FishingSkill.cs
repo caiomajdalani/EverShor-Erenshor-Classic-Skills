@@ -20,7 +20,7 @@ namespace ErenshorSkills.Skills
             SkillsSaveManager.Data.Fishing.Level * 0.5f;
 
         /// <summary>Called by the Harmony patch when a catch completes.</summary>
-        public static void OnCatch(string itemName, bool isRare, bool isJunk)
+        public static bool OnCatch(string itemName, bool isRare, bool isJunk)
         {
             var skill = SkillsSaveManager.Data.Fishing;
             string zone = SceneManager.GetActiveScene().name;
@@ -33,18 +33,12 @@ namespace ErenshorSkills.Skills
                 // Still award minimal XP so they can progress
                 SkillXpEngine.AwardXp(skill, 2f);
 
-                string[] junkCatches = {
-                    "a Soggy Boot", "a Tangled Mess of Seaweed",
-                    "a Waterlogged Stick", "a Rusty Hook",
-                    "a Clump of Mud", "a Broken Fishing Line",
-                    "an Old Tin Can", "a Slimy Rock"
-                };
-                string junk = junkCatches[UnityEngine.Random.Range(0, junkCatches.Length)];
                 ChatHelper.Send(
                     $"<color=#7EC8E3>[Fishing]</color> " +
-                    $"<color=#AAAAAA>You pull up {junk}. The waters here are beyond your skill. " +
+                    $"<color=#AAAAAA>You caught {itemName}, but the waters here are beyond your skill, " +
+                    $"so you found no bonus cooking materials. " +
                     $"(Need Fishing {reqLevel}, have {skill.Level})</color>");
-                return;
+                return false;
             }
 
             skill.TimesUsed++;
@@ -59,6 +53,7 @@ namespace ErenshorSkills.Skills
             if (IsNight()) xp *= 1.1f;
 
             SkillXpEngine.AwardXp(skill, xp);
+            return true;
         }
 
         private static bool IsNight()

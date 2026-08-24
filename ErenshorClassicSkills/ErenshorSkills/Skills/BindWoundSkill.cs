@@ -12,23 +12,42 @@ namespace ErenshorSkills.Skills
     /// In Erenshor, this adds an active out-of-combat self-heal:
     /// - Press the hotkey while not in combat
     /// - Heals a percentage of your max HP based on skill level
-    /// - Base: 3% max HP at level 1, scaling to ~28% at level 50
+    /// - Base is configurable; healing scales by +0.15% max HP per level
     /// - Has a cooldown (reduced by skill)
     /// - Must be below 70% HP to use (EQ's old restriction)
     /// - Higher skill = more HP healed and shorter cooldown
     ///
-    /// At level 25+: Can be used on targeted SimPlayers too.
     /// At level 40+: HP threshold increases to 90%.
     /// </summary>
     public static class BindWoundSkill
     {
-        private static float _lastUseTime = 0f;
+        private static float _lastUseTime = float.NegativeInfinity;
+
+        internal static void ResetRuntime()
+        {
+            _lastUseTime = float.NegativeInfinity;
+        }
 
         /// <summary>Cooldown in seconds.</summary>
         public static float Cooldown =>
             SkillsPlugin.CfgTestCooldowns.Value
                 ? 1f
                 : Mathf.Max(45f - SkillsSaveManager.Data.BindWound.Level * 0.5f, 15f);
+
+        /// <summary>Safe, finite cooldown time remaining for HUD display.</summary>
+        public static float CooldownRemaining
+        {
+            get
+            {
+                if (float.IsNegativeInfinity(_lastUseTime)) return 0f;
+                float remaining = Cooldown - (Time.time - _lastUseTime);
+                if (float.IsNaN(remaining) || float.IsInfinity(remaining))
+                    return 0f;
+                return Mathf.Max(0f, remaining);
+            }
+        }
+
+        public static bool IsReady => CooldownRemaining <= 0f;
 
         /// <summary>Percentage of max HP healed per use (0-100).</summary>
         public static float HealPercent
@@ -38,7 +57,7 @@ namespace ErenshorSkills.Skills
                 float basePct = SkillsPlugin.CfgBindWoundBaseHealPercent.Value;
                 int level = SkillsSaveManager.Data.BindWound.Level;
                 // Scales to 30% at skill 180: (30 - 3) / 180 = 0.15
-                return basePct + level * 0.15f;
+                return Mathf.Clamp(basePct + level * 0.15f, 0f, 100f);
             }
         }
 
@@ -53,37 +72,24 @@ namespace ErenshorSkills.Skills
         }
 
         /// <summary>
-        /// Find and consume one Patchwork Bandage from inventory.
-        /// Returns true if a bandage was found and consumed.
+        /// Find one Patchwork Bandage in inventory without mutating it.
         /// </summary>
-        private static bool ConsumeBandage()
+        private static ItemIcon FindBandage()
         {
             try
             {
                 var inv = GameData.PlayerInv;
-                if (inv?.StoredSlots == null) return false;
+                if (inv?.StoredSlots == null) return null;
 
                 foreach (var slot in inv.StoredSlots)
                 {
                     if (slot?.MyItem == null) continue;
                     if (slot.MyItem.ItemName != "Patchwork Bandages") continue;
-
-                    // Found bandages — consume one
-                    if (slot.Quantity <= 1)
-                    {
-                        slot.MyItem = GameData.PlayerInv.Empty;
-                        slot.Quantity = 0;
-                    }
-                    else
-                    {
-                        slot.Quantity--;
-                    }
-                    slot.UpdateSlotImage();
-                    return true;
+                    return slot;
                 }
             }
             catch { }
-            return false;
+            return null;
         }
 
         public static void TryBindWound()
@@ -103,7 +109,6 @@ namespace ErenshorSkills.Skills
             // Must be out of combat
             try
             {
-                var player = GameData.PlayerControl;
                 if (GameData.InCombat)
                 {
                     ChatHelper.Send(
@@ -112,31 +117,35 @@ namespace ErenshorSkills.Skills
                     return;
                 }
             }
-            catch { }
+            catch (System.Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning(
+                    $"Bind Wound stopped because combat state was unavailable: {ex.Message}");
+                return;
+            }
 
             // Check HP threshold
-            int maxHP = 100;
-            try
+            var playerStats = GameData.PlayerStats;
+            if (playerStats == null || playerStats.CurrentMaxHP <= 0)
             {
-                var stats = GameData.PlayerStats;
-                if (stats != null)
-                {
-                    maxHP = stats.CurrentMaxHP;
-                    float hpRatio = (float)stats.CurrentHP / (float)stats.CurrentMaxHP;
-                    if (hpRatio >= HpThreshold)
-                    {
-                        int pct = Mathf.RoundToInt(HpThreshold * 100f);
-                        ChatHelper.Send(
-                            $"<color=#EF5350>[Bind Wound]</color> " +
-                            $"You must be below {pct}% HP to bind wounds.");
-                        return;
-                    }
-                }
+                ChatHelper.Send(
+                    "<color=#EF5350>[Bind Wound]</color> Your health data is unavailable.");
+                return;
             }
-            catch { }
+            int maxHP = playerStats.CurrentMaxHP;
+            float hpRatio = (float)playerStats.CurrentHP / playerStats.CurrentMaxHP;
+            if (hpRatio >= HpThreshold)
+            {
+                int pct = Mathf.RoundToInt(HpThreshold * 100f);
+                ChatHelper.Send(
+                    $"<color=#EF5350>[Bind Wound]</color> " +
+                    $"You must be below {pct}% HP to bind wounds.");
+                return;
+            }
 
-            // Check for bandages in inventory
-            if (!ConsumeBandage())
+            // Check for bandages in inventory without consuming yet.
+            var bandageSlot = FindBandage();
+            if (bandageSlot == null)
             {
                 ChatHelper.Send(
                     $"<color=#EF5350>[Bind Wound]</color> " +
@@ -145,50 +154,95 @@ namespace ErenshorSkills.Skills
                 return;
             }
 
-            _lastUseTime = Time.time;
-
             var skill = SkillsSaveManager.Data.BindWound;
-
-            // Skill check determines if the bandage is effective
-            bool success = SkillXpEngine.SkillCheck(skill, 1.0f,
-                xpOnSuccess: 15f, xpOnFailure: 5f);
-
-            if (success)
+            int oldLevel = skill.Level;
+            float oldXp = skill.CurrentXp;
+            int oldTimesUsed = skill.TimesUsed;
+            int oldSuccesses = skill.Successes;
+            int oldFailures = skill.Failures;
+            int oldHp = playerStats.CurrentHP;
+            float oldLastUse = _lastUseTime;
+            Items.BagSystem.MutationSnapshot mutation = null;
+            string resultMessage = null;
+            try
             {
-                int heal = CalculateHeal(maxHP);
+                mutation = Items.BagSystem.BeginExternalMutation();
 
-                // Actually heal the player
-                try
+                // Consume exactly one only after the complete operation has a
+                // rollback snapshot. Patchwork Bandages are stackable.
+                if (bandageSlot.Quantity <= 1)
                 {
-                    var stats = GameData.PlayerStats;
-                    if (stats != null)
-                    {
-                        int before = stats.CurrentHP;
-                        stats.CurrentHP = Mathf.Min(
-                            stats.CurrentHP + heal, stats.CurrentMaxHP);
-                        heal = stats.CurrentHP - before; // Actual amount healed
-                    }
+                    bandageSlot.MyItem = GameData.PlayerInv.Empty;
+                    bandageSlot.Quantity = 1;
                 }
-                catch { }
+                else
+                    bandageSlot.Quantity--;
+                bandageSlot.UpdateSlotImage();
 
-                ChatHelper.Send(
-                    $"<color=#EF5350>[Bind Wound]</color> " +
-                    $"You have been bandaged for " +
-                    $"<color=#FFFFFF>{heal}</color> hit points " +
-                    $"<color=#AAAAAA>({HealPercent:F1}% of max HP)</color>.");
-            }
-            else
-            {
-                string[] failMsgs = new string[]
+                _lastUseTime = Time.time;
+
+                // Skill check determines if the bandage is effective
+                bool success = SkillXpEngine.SkillCheck(skill, 1.0f,
+                    xpOnSuccess: 15f, xpOnFailure: 5f,
+                    requestSave: false);
+
+                if (success)
                 {
-                    "The bandage slips. You fail to bind your wounds.",
-                    "You fumble with the bandage materials.",
-                    "Your wound dressing doesn't take hold.",
-                    "The bandage is too loose to be effective."
-                };
+                    int heal = CalculateHeal(maxHP);
+                    int before = playerStats.CurrentHP;
+                    playerStats.CurrentHP = Mathf.Min(
+                        playerStats.CurrentHP + heal, playerStats.CurrentMaxHP);
+                    heal = playerStats.CurrentHP - before; // Actual amount healed
+
+                    resultMessage =
+                        $"<color=#EF5350>[Bind Wound]</color> " +
+                        $"You have been bandaged for " +
+                        $"<color=#FFFFFF>{heal}</color> hit points " +
+                        $"<color=#AAAAAA>({HealPercent:F1}% of max HP)</color>.";
+                }
+                else
+                {
+                    string[] failMsgs = new string[]
+                    {
+                        "The bandage slips. You fail to bind your wounds.",
+                        "You fumble with the bandage materials.",
+                        "Your wound dressing doesn't take hold.",
+                        "The bandage is too loose to be effective."
+                    };
+                    resultMessage =
+                        $"<color=#EF5350>[Bind Wound]</color> " +
+                        $"<color=#AAAAAA>{failMsgs[Random.Range(0, failMsgs.Length)]}</color>";
+                }
+
+                if (!Items.BagSystem.CommitExternalMutation("bind-wound", mutation))
+                    throw new System.InvalidOperationException(
+                        "The inventory transaction could not be saved.");
+
+                // Do not persist progression before the bandage transaction:
+                // a crash must never grant skill XP while restoring the item.
+                if (!SkillsSaveManager.Save())
+                    SkillsPlugin.Log.LogWarning(
+                        "Bind Wound succeeded, but skill progression will be retried on the next save.");
+
+                ChatHelper.Send(resultMessage);
+            }
+            catch (System.Exception ex)
+            {
+                // Restore non-inventory state before the inventory rollback's
+                // native save, so a failed transaction cannot grant a free heal.
+                skill.Level = oldLevel;
+                skill.CurrentXp = oldXp;
+                skill.TimesUsed = oldTimesUsed;
+                skill.Successes = oldSuccesses;
+                skill.Failures = oldFailures;
+                playerStats.CurrentHP = oldHp;
+                _lastUseTime = oldLastUse;
+                if (mutation != null)
+                    Items.BagSystem.RollbackExternalMutation(mutation);
+                SkillsSaveManager.Save();
+                SkillsPlugin.Log.LogError($"Bind Wound failed and was rolled back: {ex}");
                 ChatHelper.Send(
-                    $"<color=#EF5350>[Bind Wound]</color> " +
-                    $"<color=#AAAAAA>{failMsgs[Random.Range(0, failMsgs.Length)]}</color>");
+                    "<color=#EF5350>[Bind Wound]</color> The attempt was cancelled; your bandage was restored.");
             }
         }
     }

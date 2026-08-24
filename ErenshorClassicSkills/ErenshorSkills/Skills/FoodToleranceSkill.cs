@@ -13,7 +13,6 @@ namespace ErenshorSkills.Skills
     /// How it works:
     /// - Levels passively whenever you consume food or drink items
     /// - Higher skill = longer duration on all consumable buffs
-    /// - At level 25+: Small stat bonus to all food/drink effects
     /// - At level 50: "Your constitution is legendary."
     ///
     /// This fills a niche the Erenshor community already expressed interest
@@ -25,17 +24,6 @@ namespace ErenshorSkills.Skills
         /// <summary>Percentage bonus to food/drink buff duration.</summary>
         public static float DurationBonus =>
             SkillsSaveManager.Data.FoodTolerance.Level * 0.556f;
-
-        /// <summary>Flat stat bonus applied to food/drink effects at level 25+.</summary>
-        public static int StatBonus
-        {
-            get
-            {
-                int level = SkillsSaveManager.Data.FoodTolerance.Level;
-                if (level < 25) return 0;
-                return (level - 25) / 5 + 1; // +1 at 25, +2 at 30, etc.
-            }
-        }
 
         /// <summary>
         /// Called by the Harmony patch when a consumable is used.
@@ -87,7 +75,7 @@ namespace ErenshorSkills.Skills
 
         private static bool IsPotent(string itemName)
         {
-            string lower = itemName.ToLower();
+            string lower = (itemName ?? "").ToLowerInvariant();
             return lower.Contains("elixir") ||
                    lower.Contains("draught") ||
                    lower.Contains("potion") ||

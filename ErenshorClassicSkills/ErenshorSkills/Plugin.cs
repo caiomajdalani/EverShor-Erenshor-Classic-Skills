@@ -1,6 +1,4 @@
 using System;
-using System.Collections;
-using System.Collections.Generic;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -14,15 +12,20 @@ namespace ErenshorSkills
     {
         public const string PluginGuid = "com.erenshor.classicskills";
         public const string PluginName = "Erenshor Classic Skills";
-        public const string PluginVersion = "1.0.0";
+        public const string PluginVersion = "1.8.1";
 
         internal static ManualLogSource Log;
         internal static SkillsPlugin Instance;
         private Harmony _harmony;
+        private bool _recoverNativeItemsAfterLiveEnable;
 
         // ── Global Config ───────────────────────────────────────────────
         internal static ConfigEntry<KeyCode> CfgSkillWindowKey;
         internal static ConfigEntry<bool> CfgShowChatMessages;
+        internal static ConfigEntry<bool> CfgShowUtilityActionButtons;
+        internal static ConfigEntry<bool> CfgEnableCorpseRun;
+        internal static ConfigEntry<bool> CfgEnableNecromancer;
+        internal static ConfigEntry<bool> CfgEnableMonk;
         internal static ConfigEntry<int> CfgGlobalMaxLevel;
 
         // ── Per-skill toggles ───────────────────────────────────────────
@@ -42,6 +45,19 @@ namespace ErenshorSkills
 
         // ── Magic skills ────────────────────────────────────────────
         internal static ConfigEntry<bool> CfgEnableMagicSkills;
+        internal static ConfigEntry<bool> CfgEnableSimPlayerSkills;
+        internal static ConfigEntry<bool> CfgEnableSimCraft;
+        internal static ConfigEntry<int> CfgSimCraftFailCooldown;
+        internal static ConfigEntry<int> CfgSimChatIntervalMin;
+        internal static ConfigEntry<int> CfgSimChatIntervalMax;
+        internal static ConfigEntry<bool> CfgEnableSimWTB;
+        internal static ConfigEntry<bool> CfgEnableSimWTS;
+        internal static ConfigEntry<int> CfgSimWTBExpiry;
+        internal static ConfigEntry<bool> CfgCatchUpCombatMagic;
+        internal static ConfigEntry<bool> CfgCatchUpUtilityTrade;
+        internal static ConfigEntry<bool> CfgForceCatchUp;
+        internal static ConfigEntry<bool> CfgCraftFromBags;
+        internal static ConfigEntry<bool> CfgCraftFromBank;
         internal static ConfigEntry<float> CfgEvocationDamagePerLevel;
         internal static ConfigEntry<float> CfgAbjurationDurationPerLevel;
         internal static ConfigEntry<float> CfgAlterationHealPerLevel;
@@ -57,13 +73,26 @@ namespace ErenshorSkills
         internal static ConfigEntry<float> CfgMeditateBaseMana;
         // Safe Fall removed
         internal static ConfigEntry<bool> CfgTestCooldowns;
+        internal static ConfigEntry<bool> CfgEnableTestMode;
+        internal static ConfigEntry<bool> CfgEnableDebugCommands;
+
+        internal static int ExpectedPatchClassCount { get; private set; }
+        internal static int AppliedPatchClassCount { get; private set; }
+        internal static int FailedPatchClassCount { get; private set; }
 
         private void Awake()
         {
             Instance = this;
             Log = Logger;
 
+            bool pathsValid = RuntimePaths.Validate(out string pathDetail);
+            if (pathsValid)
+                Log.LogInfo($"Runtime paths: {pathDetail}");
+            else
+                Log.LogWarning($"Runtime path validation failed: {pathDetail}");
+
             BindConfig();
+            ValidateConfig();
 
             _harmony = new Harmony(PluginGuid);
             PatchAllSafe();
@@ -78,24 +107,65 @@ namespace ErenshorSkills
 
         private void Start()
         {
-            DebugLog($"Start() called. GO active={gameObject.activeSelf}, enabled={enabled}");
             Log.LogInfo($"Classic Skills: Start() called. GO={gameObject.name}, active={gameObject.activeSelf}");
-            StartCoroutine(InputPollingCoroutine());
+
+            // Load sim-learned recipes
+            Skills.SimPlayerTradeskills.LoadSimRecipes();
+
+            UnityEngine.SceneManagement.Scene activeScene =
+                UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            bool activeWorld = activeScene.IsValid() &&
+                activeScene.name != "Menu" && activeScene.name != "LoadScene" &&
+                GameData.PlayerInv?.StoredSlots != null &&
+                GameData.CurrentCharacterSlot != null;
+            bool catalogWasInitialized = Items.ItemFactory.Initialized;
+            if (!catalogWasInitialized && GameData.ItemDB != null)
+                Items.ItemFactory.Initialize(GameData.ItemDB);
+            Necromancer.NecromancerCatalog.TryInitialize();
+            Monk.MonkCatalog.TryInitialize();
+            if (activeWorld)
+            {
+                Necromancer.NecromancerCatalog.RestoreKnownSpellsAfterHotLoad();
+                Monk.MonkCatalog.RestoreKnownSkillsAfterHotLoad();
+            }
+            _recoverNativeItemsAfterLiveEnable = activeWorld &&
+                !catalogWasInitialized && Items.ItemFactory.Initialized;
+            Items.ItemFactory.SetHotLoadRecoveryPending(
+                _recoverNativeItemsAfterLiveEnable);
 
             // Initialize uGUI-based skills window
             if (gameObject.GetComponent<SkillsUI>() == null)
                 gameObject.AddComponent<SkillsUI>();
             if (gameObject.GetComponent<MenuBarButton>() == null)
                 gameObject.AddComponent<MenuBarButton>();
+            if (gameObject.GetComponent<UI.LogDisplaySettingsUI>() == null)
+                gameObject.AddComponent<UI.LogDisplaySettingsUI>();
+            if (gameObject.GetComponent<UI.ExtraSettingsMenuBarButton>() == null)
+                gameObject.AddComponent<UI.ExtraSettingsMenuBarButton>();
+            if (gameObject.GetComponent<UtilityActionBar>() == null)
+                gameObject.AddComponent<UtilityActionBar>();
+            if (gameObject.GetComponent<Testing.AddonTestMode>() == null)
+                gameObject.AddComponent<Testing.AddonTestMode>();
+            if (gameObject.GetComponent<Testing.UiAutomationBridge>() == null)
+                gameObject.AddComponent<Testing.UiAutomationBridge>();
 
-            // Pre-build the tradeskill window so first station click is instant
-            UI.TradeskillWindow.Open("Smithing");
-            UI.TradeskillWindow.Close();
-        }
+            if (CfgEnableTestMode?.Value == true)
+                Log.LogWarning(
+                    "TEST MODE IS ENABLED. Disable Testing.EnableTestMode after controlled verification.");
 
-        private void OnEnable()
-        {
-            DebugLog($"OnEnable() called.");
+            // BepInEx normally creates us before the character scene loads, but
+            // Lunaris can enable or hot-reload a legacy plugin while the player
+            // is already in the world.  In that case there is no future
+            // sceneLoaded event to bootstrap the current character, so run the
+            // same guarded scene initialization against the active scene now.
+            // The real sceneLoaded callback remains subscribed for later zone
+            // and character changes.
+            if (activeScene.IsValid())
+                OnSceneLoaded(activeScene,
+                    UnityEngine.SceneManagement.LoadSceneMode.Single);
+            if (activeWorld)
+                Items.SimPlayerCraftedItems.ReconcileLoadedSimPlayers();
+
         }
 
         /// <summary>
@@ -103,9 +173,8 @@ namespace ErenshorSkills
         /// </summary>
         private void PatchAllSafe()
         {
-            var patchTypes = new System.Type[]
+            var patchTypes = new System.Collections.Generic.List<System.Type>
             {
-                typeof(Patches.Patch_LoadCharacter),
                 typeof(Patches.Patch_SaveOnInventory),
                 typeof(Patches.Patch_DoFishing),
                 // Fishing cast time reduction removed
@@ -119,42 +188,158 @@ namespace ErenshorSkills
                 typeof(Patches.Patch_BuffDuration),
                 // Combat XP + Attack Sync Fix (merged)
                 typeof(Patches.Patch_PerformAttacks),
+                typeof(Patches.Patch_MeleeXP),
                 typeof(Patches.Patch_WandXP),
                 typeof(Patches.Patch_ArcheryXP),
                 typeof(Patches.Patch_NPCMeleeSync),
-                typeof(Patches.Patch_NPCMeleeSoundSuppressor),
                 typeof(Patches.Patch_ChatCommands),
+                typeof(Features.Patch_ChatLogLineDisplayOptions),
+                typeof(Features.Patch_LogDamageTypeCapture),
+                typeof(Patches.Patch_CorpseRunDeath),
+                typeof(Patches.Patch_CorpseRunNativeSaveResult),
+                typeof(Patches.Patch_CorpseRunLootPriority),
+                typeof(Necromancer.Patch_NecromancerClassDatabase),
+                typeof(Necromancer.Patch_NecromancerSpellDatabase),
+                typeof(Necromancer.Patch_NecromancerStarterAuraMerchant),
+                typeof(Necromancer.Patch_NecromancerGearLootTables),
+                typeof(Necromancer.Patch_NecromancerAscensionDatabase),
+                typeof(Necromancer.Patch_NecromancerAscensionEffects),
+                typeof(Necromancer.Patch_NecromancerAscensionSpent),
+                typeof(Necromancer.Patch_NecromancerAscensionClassTab),
+                typeof(Necromancer.Patch_NecromancerCharacterCreationStart),
+                typeof(Necromancer.Patch_NecromancerSelectSlot),
+                typeof(Necromancer.Patch_NecromancerSelectBackupSlot),
+                typeof(Necromancer.Patch_NecromancerPlay),
+                typeof(Necromancer.Patch_NecromancerPlayAlternate),
+                typeof(Necromancer.Patch_NecromancerStartingItems),
+                typeof(Necromancer.Patch_NecromancerPlayerClassIcon),
+                typeof(Necromancer.Patch_NecromancerRaidClassIcon),
+                typeof(Necromancer.Patch_NecromancerCast),
+                typeof(Necromancer.Patch_NecromancerCastStartVfx),
+                typeof(Necromancer.Patch_NecromancerSpellResolve),
+                typeof(Necromancer.Patch_NecromancerStatusVfx),
+                typeof(Necromancer.Patch_NecromancerPetTrade),
+                typeof(Necromancer.Patch_NecromancerPetTradeSnapshot),
+                typeof(Necromancer.Patch_NecromancerPetTradeCancel),
+                typeof(Necromancer.Patch_NecromancerPetDeath),
+                typeof(Necromancer.Patch_NecromancerPetTaunt),
+                typeof(Necromancer.Patch_NecromancerPetDismiss),
+                typeof(Necromancer.Patch_NecromancerPetWeaponAttack),
+                typeof(Necromancer.Patch_NecromancerPetBowDelivery),
+                typeof(Necromancer.Patch_NecromancerPetStatCurve),
+                typeof(Necromancer.Patch_NecromancerFeignAggroOn),
+                typeof(Necromancer.Patch_NecromancerFeignForceAggro),
+                typeof(Necromancer.Patch_NecromancerFeignManageAggro),
+                typeof(Necromancer.Patch_NecromancerSharedSkillMouseUse),
+                typeof(Necromancer.Patch_NecromancerSharedSkillGamepadUse),
+                typeof(Necromancer.Patch_NecromancerSharedSkillTooltip),
+                typeof(Monk.Patch_MonkClassDatabase),
+                typeof(Monk.Patch_MonkSkillDatabase),
+                typeof(Monk.Patch_MonkSpellDatabase),
+                typeof(Monk.Patch_MonkStarterAuraMerchant),
+                typeof(Monk.Patch_MonkAscensionDatabase),
+                typeof(Monk.Patch_MonkAscensionEffects),
+                typeof(Monk.Patch_MonkAscensionSpent),
+                typeof(Monk.Patch_MonkAscensionClassTab),
+                typeof(Monk.Patch_MonkCharacterCreationStart),
+                typeof(Monk.Patch_MonkSelectSlot),
+                typeof(Monk.Patch_MonkSelectBackupSlot),
+                typeof(Monk.Patch_MonkPlay),
+                typeof(Monk.Patch_MonkPlayAlternate),
+                typeof(Monk.Patch_MonkStartingItems),
+                typeof(Monk.Patch_MonkPlayerClassIcon),
+                typeof(Monk.Patch_MonkRaidClassIcon),
+                typeof(Monk.Patch_MonkSkillMouseUse),
+                typeof(Monk.Patch_MonkSkillGamepadUse),
+                typeof(Monk.Patch_MonkSkillTooltip),
+                typeof(Monk.Patch_MonkUseSkill),
+                // Routes technique spells into PrepareSpellUse. Without this
+                // registration every technique cast fell through to the native
+                // spell path: CastAtk casting animation, mana spent, zero
+                // damage or healing, and no VFX — the class simply did not
+                // function, while every internal QA check still passed because
+                // they invoke the runtime directly.
+                typeof(Monk.Patch_MonkCastTechnique),
+                typeof(Monk.Patch_MonkDamageRules),
+                typeof(Monk.Patch_MonkFeignAggroOn),
+                typeof(Monk.Patch_MonkFeignForceAggro),
+                typeof(Monk.Patch_MonkFeignManageAggro),
+                typeof(Monk.Patch_MonkOpenHandDamage),
+                typeof(Monk.Patch_MonkAutoAttackAnimation),
                 typeof(Stations.Patch_OpenForge),
-                typeof(Stations.Patch_PlayerInteract),
                 typeof(Stations.Patch_ZoneLoad_Stations),
                 typeof(Stations.Patch_VendorLoadWindow),
                 typeof(Stations.Patch_VendorPurchase),
+                typeof(Stations.Patch_VendorSellStack),
                 typeof(Patches.Patch_PreventBagSplit),
                 typeof(Patches.Patch_BagStoreOnRightClick),
+                typeof(Items.Patch_SimTradeBagComplete),
+                typeof(Items.Patch_SimTradeBagCancel),
+                typeof(Items.Patch_VendorBagSale),
+                typeof(Items.Patch_GlobalBankBagIntegrity),
+                typeof(Items.Patch_GlobalBankCustomItemDisplay),
                 typeof(Patches.Patch_FoodToleranceXP),
-                typeof(Patches.Patch_FoodToleranceDuration),
                 typeof(Patches.Patch_FoodToleranceDuration4),
                 typeof(Items.Patch_ItemDatabase_Init),
                 typeof(Items.Patch_ItemDatabase_Awake),
                 typeof(Items.Patch_GetItemByID),
+                typeof(Patches.Patch_ClassAuraNativeSave),
+                typeof(Patches.Patch_ClassAuraEquipmentLoad),
+                typeof(Items.Patch_GetCustomBuffById),
+                typeof(Items.Patch_ModularParts_AddonBracerOrder),
                 typeof(Patches.Patch_TooltipInject),
                 typeof(Patches.Patch_SpellTooltip),
                 typeof(Patches.Patch_SpellBookTooltip),
                 typeof(Patches.Patch_HotbarSpellTooltip),
                 typeof(Patches.Patch_CombatDamageBonus_Melee),
                 typeof(Patches.Patch_CombatDamageBonus_Bow),
+                typeof(Patches.Patch_CombatDamageBonus_Wand),
                 typeof(Patches.Patch_RecipeDrop),
                 typeof(Patches.Patch_MeatDrop),
                 typeof(Patches.Patch_MiningNodeDrop),
                 typeof(Patches.Patch_EndgameMaterialDrop),
-                typeof(Patches.Patch_MiningBonus),
                 typeof(Patches.Patch_MagicSkillXP),
                 typeof(Patches.Patch_MagicSkillXP2),
+                typeof(Patches.Patch_ConjurationPetPhysicalDamage),
+                typeof(Patches.Patch_ConjurationDotContext),
+                typeof(Patches.Patch_ConjurationDotDamage),
                 typeof(Patches.Patch_EvocationDamage),
+                typeof(Patches.Patch_PlayerSpellDamage),
                 typeof(Patches.Patch_AlterationHeal),
+                typeof(Patches.Patch_SimWTBTracker),
+                typeof(Patches.Patch_SimRecipeTrade),
+                typeof(Items.Patch_SimTradeCraftedConsumables),
+                typeof(Items.Patch_SimPlayerCraftedUpgradeInterest),
+                typeof(Items.Patch_SimPlayerCraftedConsumableSpellFilter),
             };
 
+            // The DPS-benchmark instrumentation hooks the hottest methods in
+            // the game: Stats.TickEffects (every Stats, every tick) and all
+            // four Character damage entry points (every damage event, every
+            // character in the zone). They no-op unless a benchmark run is
+            // active, but the Harmony wrappers stay in the call path forever.
+            // Only install them when QA test mode is actually enabled.
+            if (CfgEnableTestMode?.Value == true)
+            {
+                patchTypes.AddRange(new[]
+                {
+                    typeof(Testing.Patch_Level35DpsGameManagerSaveGuard),
+                    typeof(Testing.Patch_Level35DpsGameDataSaveGuard),
+                    typeof(Testing.Patch_Level35DpsPhysicalIsolation),
+                    typeof(Testing.Patch_Level35DpsBleedIsolation),
+                    typeof(Testing.Patch_Level35DpsMagicIsolation),
+                    typeof(Testing.Patch_Level35DpsEnvironmentIsolation),
+                    typeof(Testing.Patch_Level35DpsStatusIsolation),
+                    typeof(Testing.Patch_Level35DpsStatusTickAttribution),
+                    typeof(Testing.Patch_Level35DpsSpellResolveAttribution),
+                    typeof(Testing.Patch_Level35DpsWandBoltAttribution),
+                });
+                Log.LogInfo(
+                    "Test mode: DPS-benchmark instrumentation patches enabled.");
+            }
+
             int ok = 0, fail = 0;
+            ExpectedPatchClassCount = patchTypes.Count;
             foreach (var t in patchTypes)
             {
                 try
@@ -168,6 +353,8 @@ namespace ErenshorSkills
                     Log.LogWarning($"Patch {t.Name} failed (non-fatal): {ex.Message}");
                 }
             }
+            AppliedPatchClassCount = ok;
+            FailedPatchClassCount = fail;
             Log.LogInfo($"Harmony: {ok} patches applied, {fail} skipped.");
         }
 
@@ -178,8 +365,29 @@ namespace ErenshorSkills
                 "Key to toggle the Classic Skills window.");
             CfgShowChatMessages = Config.Bind("Global", "ShowChatMessages", true,
                 "Show skill-up and usage messages in chat.");
+            CfgShowUtilityActionButtons = Config.Bind("Interface",
+                "ShowUtilityActionButtons", true,
+                "Show draggable Forage, Bind Wound, and Begging icons with hotkeys and cooldown overlays.");
+            Features.LogDisplayOptions.BindConfig(Config);
+            // Lunaris's legacy ConfigFile wrapper keys entries by key name only,
+            // without the BepInEx section. Two generic "Enabled" entries would
+            // therefore alias one another and make Necromancer follow the
+            // corpse-run default. Keep legacy BepInEx names for existing configs,
+            // but use unambiguous keys in Lunaris's plugin-options store.
+            string corpseRunEnabledKey = RuntimePaths.IsLunaris
+                ? "CorpseRunEnabled" : "Enabled";
+            string necromancerEnabledKey = RuntimePaths.IsLunaris
+                ? "NecromancerEnabled" : "Enabled";
+            string monkEnabledKey = RuntimePaths.IsLunaris
+                ? "MonkEnabled" : "Enabled";
+            CfgEnableCorpseRun = Config.Bind("Corpse Run", corpseRunEnabledKey, false,
+                "Opt in to leaving inventory, equipped gear, cosmetics, aura, charm, and gold on a recoverable corpse when you die.");
+            CfgEnableNecromancer = Config.Bind("Necromancer", necromancerEnabledKey, true,
+                "Add the playable Necromancer class, its spells, armed skeletal pets, and spell merchants.");
+            CfgEnableMonk = Config.Bind("Monk", monkEnabledKey, true,
+                "Add the playable Monk class, its hand-to-hand techniques, auras, class gear, and martial trainers.");
             CfgGlobalMaxLevel = Config.Bind("Global", "MaxSkillLevel", 180,
-                "Maximum level for all skills (1-200).");
+                "Maximum level for all skills (1-180).");
 
             // ── Skill Toggles ───────────────────────────────────────────
             CfgEnableFishing = Config.Bind("Skill Toggles", "EnableFishing", true,
@@ -200,8 +408,35 @@ namespace ErenshorSkills
                 "Enable the Begging skill (beg NPCs for copper).");
             CfgEnableCombatSkills = Config.Bind("Skill Toggles", "EnableCombatSkills", true,
                 "Enable combat weapon skills (1H Slash, 1H Blunt, Piercing, etc.).");
+            CfgCraftFromBags = Config.Bind("Tradeskills", "CraftFromBags", false,
+                "Allow tradeskill crafting to pull materials from bags in your inventory.");
+            CfgCraftFromBank = Config.Bind("Tradeskills", "CraftFromBank", false,
+                "Allow tradeskill crafting to pull materials from your bank.");
+
             CfgEnableMagicSkills = Config.Bind("Skill Toggles", "EnableMagicSkills", true,
                 "Enable magic skills (Evocation, Abjuration, Alteration, Conjuration).");
+            CfgEnableSimPlayerSkills = Config.Bind("Skill Toggles", "EnableSimPlayerSkills", true,
+                "Give sim players virtual combat/magic skill bonuses based on their level and class.");
+            CfgEnableSimCraft = Config.Bind("Skill Toggles", "EnableSimCraft", true,
+                "Allow players to whisper sim players to request crafting. Sim will craft, negotiate price, walk to you, and trade.");
+            CfgSimCraftFailCooldown = Config.Bind("Skill Toggles", "SimCraftFailCooldownSeconds", 60,
+                "Cooldown in seconds before a sim player can attempt the same recipe again after a total failure.");
+            CfgSimChatIntervalMin = Config.Bind("Skill Toggles", "SimChatIntervalMinSeconds", 180,
+                "Minimum seconds between ambient sim tradeskill/skill chat messages.");
+            CfgSimChatIntervalMax = Config.Bind("Skill Toggles", "SimChatIntervalMaxSeconds", 480,
+                "Maximum seconds between ambient sim tradeskill/skill chat messages.");
+            CfgEnableSimWTB = Config.Bind("Skill Toggles", "EnableSimWTB", true,
+                "Allow players to whisper sims to sell items they've shouted WTB for. Sim comes to you and you trade via native window.");
+            CfgEnableSimWTS = Config.Bind("Skill Toggles", "EnableSimWTS", true,
+                "Sims shout real WTS listings for items they can craft. Players can whisper to buy pre-crafted items.");
+            CfgSimWTBExpiry = Config.Bind("Skill Toggles", "SimWTBExpirySeconds", 300,
+                "How long a WTB or WTS listing stays active before expiring (default 5 minutes).");
+            CfgCatchUpCombatMagic = Config.Bind("Skill Toggles", "CatchUpCombatMagicSkills", false,
+                "On first load, set combat and magic skill levels based on character level and class. Helps pre-existing characters catch up.");
+            CfgCatchUpUtilityTrade = Config.Bind("Skill Toggles", "CatchUpUtilityTradeskills", false,
+                "On first load, set utility and tradeskill levels based on character level. Helps pre-existing characters catch up.");
+            CfgForceCatchUp = Config.Bind("Skill Toggles", "ForceCatchUpOnNextLoad", false,
+                "Set to true to force catch-up skill levels on your next login, even if you already have a save file. Resets to false automatically after applying.");
 
             // ── Attack Sync Fix (merged) ────────────────────────────────
             Patches.AttackSyncConfig.Init(Config);
@@ -215,7 +450,7 @@ namespace ErenshorSkills
             CfgBegKey = Config.Bind("Keybinds", "BegKey", KeyCode.Semicolon,
                 "Key to beg from targeted NPC.");
             CfgMeditateKey = Config.Bind("Keybinds", "MeditateKey", KeyCode.M,
-                "Key to toggle meditation (must be sitting).");
+                "Legacy setting retained for config compatibility. Meditation now activates automatically while sitting out of combat.");
 
             // ── Skill Tuning ────────────────────────────────────────────
             CfgBindWoundBaseHealPercent = Config.Bind("Skill Tuning", "BindWoundBaseHealPercent", 3f,
@@ -235,95 +470,182 @@ namespace ErenshorSkills
             CfgAlterationHealPerLevel = Config.Bind("Skill Tuning", "AlterationHealPerLevel", 0.0008f,
                 "Bonus heal amount per Alteration level. At 0.0008, level 180 = +14.4%.");
             CfgConjurationDamagePerLevel = Config.Bind("Skill Tuning", "ConjurationDamagePerLevel", 0.0008f,
-                "Bonus DoT/pet damage per Conjuration level. At 0.0008, level 180 = +14.4%.");
+                "Bonus Conjuration DoT and summoned-pet damage per level. At 0.0008, level 180 = +14.4%.");
 
             // ── Testing ─────────────────────────────────────────────────
             CfgTestCooldowns = Config.Bind("Testing", "TestCooldowns", false,
                 "Set all utility skill cooldowns to 1 second for testing.");
+            CfgEnableTestMode = Config.Bind("Testing", "EnableTestMode", false,
+                "Enable the controlled /cstest smoke-test and item-grant commands. Leave disabled during normal play.");
+            CfgEnableDebugCommands = Config.Bind("Testing", "EnableDebugCommands", false,
+                "Enable developer-only chat commands that grant items/points or dump data.");
         }
 
-        private static bool _loggedFirstUpdate = false;
-        private static int _updateCount = 0;
-        private static string _debugLogPath;
-
-        private static void DebugLog(string msg)
+        private void ValidateConfig()
         {
-            try
+            ClampConfig(CfgGlobalMaxLevel, 1, 1000);
+            ClampConfig(CfgSimCraftFailCooldown, 1, 3600);
+            ClampConfig(CfgSimChatIntervalMin, 30, 86400);
+            ClampConfig(CfgSimChatIntervalMax, 60, 86400);
+            if (CfgSimChatIntervalMax.Value < CfgSimChatIntervalMin.Value)
             {
-                if (_debugLogPath == null)
-                    _debugLogPath = System.IO.Path.Combine(
-                        System.IO.Path.GetDirectoryName(
-                            System.Reflection.Assembly.GetExecutingAssembly().Location),
-                        "ClassicSkills_debug.log");
-                System.IO.File.AppendAllText(_debugLogPath, 
-                    $"[{System.DateTime.Now:HH:mm:ss}] {msg}\n");
+                Log.LogWarning("Sim chat maximum interval was below its minimum; values were aligned.");
+                CfgSimChatIntervalMax.Value = CfgSimChatIntervalMin.Value;
             }
-            catch { }
+            ClampConfig(CfgSimWTBExpiry, 10, 86400);
+            ClampConfig(CfgBindWoundBaseHealPercent, 0f, 50f, 3f);
+            ClampConfig(CfgMeditateBaseMana, 0f, 1000f, 2f);
+            ClampConfig(CfgCombatSkillDamagePerLevel, 0f, 1f, 0.085f);
+            ClampConfig(CfgEvocationDamagePerLevel, 0f, 0.01f, 0.0008f);
+            ClampConfig(CfgAbjurationDurationPerLevel, 0f, 0.02f, 0.003f);
+            ClampConfig(CfgAlterationHealPerLevel, 0f, 0.01f, 0.0008f);
+            ClampConfig(CfgConjurationDamagePerLevel, 0f, 0.01f, 0.0008f);
         }
+
+        private static void ClampConfig(ConfigEntry<int> entry, int minimum, int maximum)
+        {
+            if (entry == null) return;
+            int clamped = Mathf.Clamp(entry.Value, minimum, maximum);
+            if (clamped == entry.Value) return;
+            Log.LogWarning($"Config {entry.Definition.Key} was outside its safe range; clamped to {clamped}.");
+            entry.Value = clamped;
+        }
+
+        private static void ClampConfig(ConfigEntry<float> entry, float minimum,
+            float maximum, float fallback)
+        {
+            if (entry == null) return;
+            float current = entry.Value;
+            float clamped = float.IsNaN(current) || float.IsInfinity(current)
+                ? fallback : Mathf.Clamp(current, minimum, maximum);
+            if (clamped.Equals(current)) return;
+            Log.LogWarning($"Config {entry.Definition.Key} was outside its safe range; clamped to {clamped}.");
+            entry.Value = clamped;
+        }
+
+        private static int _updateCount = 0;
+        private static float _lastUpdateErrorLog = -60f;
 
         private void Update()
         {
             try
             {
                 _updateCount++;
-                if (!_loggedFirstUpdate && _updateCount > 10)
+                // Never process mod hotkeys while the player is typing in chat.
+                // This mirrors Erenshor's own input handling and prevents custom
+                // binds such as P or M from opening windows mid-message.
+                bool canUseHotkeys = false;
+                try
                 {
-                    _loggedFirstUpdate = true;
-                    string msg = $"Update() running at frame {_updateCount}. F8 keybind = {CfgSkillWindowKey.Value}";
-                    Log.LogInfo(msg);
-                    DebugLog(msg);
+                    canUseHotkeys = SkillsSaveManager.HasLoaded &&
+                        !GameData.PlayerTyping && !GameData.InCharSelect &&
+                        !AddonInputState.PointerOverAddon &&
+                        !IsEscapeMenuOpen;
                 }
+                catch { }
 
-                if (Input.GetKeyDown(CfgSkillWindowKey.Value))
+                if (canUseHotkeys && Input.GetKeyDown(CfgSkillWindowKey.Value))
                 {
-                    DebugLog("F8 pressed! Toggling skills window.");
                     Log.LogInfo("Classic Skills: F8 pressed!");
                     SkillsUI.ToggleWindow();
                 }
 
                 // ── Active skill keybinds ───────────────────────────────────
-                if (CfgEnableForaging.Value && Input.GetKeyDown(CfgForageKey.Value))
+                if (canUseHotkeys && CfgEnableForaging.Value && Input.GetKeyDown(CfgForageKey.Value))
                     Skills.ForagingSkill.TryForage();
 
-                if (CfgEnableBindWound.Value && Input.GetKeyDown(CfgBindWoundKey.Value))
+                if (canUseHotkeys && CfgEnableBindWound.Value && Input.GetKeyDown(CfgBindWoundKey.Value))
                     Skills.BindWoundSkill.TryBindWound();
 
                 // Sense Heading removed — game has built-in map/compass
 
-                if (CfgEnableBegging.Value && Input.GetKeyDown(CfgBegKey.Value))
+                if (canUseHotkeys && CfgEnableBegging.Value && Input.GetKeyDown(CfgBegKey.Value))
                     Skills.BeggingSkill.TryBeg();
 
-                if (CfgEnableMeditate.Value && Input.GetKeyDown(CfgMeditateKey.Value))
-                    Skills.MeditateSkill.ToggleMeditate();
+                // Ambient sim player tradeskill chat
+                if (SkillsSaveManager.HasLoaded)
+                {
+                    SkillsSaveManager.FlushIfDue();
+                    Skills.SimPlayerTradeskills.TryAmbientChat();
+                    Skills.SimPlayerTradeskills.CleanupExpiredOffers();
+                    Features.CorpseRunSystem.Tick();
+                    Necromancer.NecromancerRuntime.Tick();
+                    Monk.MonkRuntime.Tick();
+                }
+
+                // Periodically reset custom item values to prevent inflation
+                // (every ~30 seconds = ~1800 frames at 60fps)
+                if (_updateCount % 1800 == 0)
+                    Items.ItemFactory.ResetInflatedItemValues();
+
+                // Escape key closes our trade UI if it's open
+                if (Input.GetKeyDown(KeyCode.Escape) && UI.SimCraftTradeUI.IsOpen)
+                    UI.SimCraftTradeUI.Hide();
             }
             catch (Exception ex)
             {
-                if (_updateCount <= 2)
-                    DebugLog($"Update error at frame {_updateCount}: {ex}");
+                if (Time.unscaledTime - _lastUpdateErrorLog >= 10f)
+                {
+                    _lastUpdateErrorLog = Time.unscaledTime;
+                    Log.LogWarning($"Update error (rate-limited): {ex}");
+                }
             }
         }
 
-        private void OnGUI()
+        internal static bool IsEscapeMenuOpen
         {
-            SkillsUI.DoOnGUI();
+            get
+            {
+                try
+                {
+                    return GameData.GM?.EscapeMenu != null &&
+                        (GameData.GM.EscapeMenu.activeSelf ||
+                            GameData.GM.EscapeMenu.activeInHierarchy);
+                }
+                catch
+                {
+                    return false;
+                }
+            }
         }
 
         private void OnDestroy()
         {
+            try { StopAllCoroutines(); } catch { }
+            try { AddonInputState.Reset(); } catch { }
+            try { Skills.SimPlayerTradeskills.OnSceneChange(); } catch { }
             // Save on plugin destroy (game quit)
             try
             {
                 Items.ItemFactory.SaveCustomInventory();
                 SkillsSaveManager.Save();
+                Necromancer.NecromancerPetEquipment.Save();
             }
             catch { }
+            try { UI.TradeskillWindow.Shutdown(); } catch { }
+            try { UI.SimCraftTradeUI.Shutdown(); } catch { }
+            try { UI.LogDisplaySettingsUI.Shutdown(); } catch { }
+            try { UI.NativeUiStyle.Reset(); } catch { }
+            try { Features.CorpseRunSystem.Shutdown(); } catch { }
+            try { Necromancer.NecromancerCatalog.ResetRuntimeReferences(); } catch { }
+            try { Monk.MonkCatalog.ResetRuntimeReferences(); } catch { }
+            try { Items.BagWindow.Shutdown(); } catch { }
+            try { Stations.CraftingStations.Shutdown(); } catch { }
             _harmony?.UnpatchSelf();
             UnityEngine.SceneManagement.SceneManager.sceneLoaded -= OnSceneLoaded;
+            if (ReferenceEquals(Instance, this)) Instance = null;
         }
 
         private void OnSceneLoaded(UnityEngine.SceneManagement.Scene scene, UnityEngine.SceneManagement.LoadSceneMode mode)
         {
+            // Scene-bound SimCraft and delayed-load coroutines must not carry stale
+            // Character/Transform references into the next zone or character.
+            StopAllCoroutines();
+            AddonInputState.Reset();
             string name = scene.name;
+            Necromancer.NecromancerCatalog.TryInitialize();
+            Monk.MonkCatalog.TryInitialize();
+            try { Features.CorpseRunSystem.OnSceneLoaded(name); } catch { }
             if (name == "Menu" || name == "LoadScene")
             {
                 // Close skills window when returning to menu or loading screen
@@ -341,8 +663,24 @@ namespace ErenshorSkills
                     }
                     catch { }
                 }
+            }
 
+            // On ANY scene change, clean up active SimCraft state
+            // to prevent stale UI/coroutines persisting across zones
+            try
+            {
+                if (UI.SimCraftTradeUI.IsOpen)
+                    UI.SimCraftTradeUI.Hide();
+                Skills.SimPlayerTradeskills.OnSceneChange();
+            }
+            catch { }
+
+            if (name == "Menu" || name == "LoadScene")
+            {
                 // Clear all stale data IMMEDIATELY so it can't leak
+                try { Necromancer.NecromancerPetEquipment.Save(); } catch { }
+                Necromancer.NecromancerCatalog.ResetRuntimeReferences();
+                Monk.MonkCatalog.ResetRuntimeReferences();
                 SkillsSaveManager.Reset();
             }
             else
@@ -370,6 +708,9 @@ namespace ErenshorSkills
                     }
                     catch { }
                 }
+                Necromancer.NecromancerVendors.OnSceneLoaded(name);
+                Monk.MonkVendors.OnSceneLoaded(name);
+                Items.SimPlayerCraftedItems.ReconcileLoadedSimPlayers();
             }
         }
 
@@ -395,7 +736,52 @@ namespace ErenshorSkills
             if (!string.IsNullOrEmpty(charName) && !SkillsSaveManager.HasLoaded)
             {
                 SkillsSaveManager.Load(charName);
+                if (!SkillsSaveManager.HasLoaded)
+                {
+                    Log.LogError($"Skills could not be loaded safely for '{charName}'.");
+                    yield break;
+                }
+                if (_recoverNativeItemsAfterLiveEnable)
+                {
+                    Items.ItemFactory.RecoverMissingItemsAfterHotEnable();
+                    _recoverNativeItemsAfterLiveEnable =
+                        !Items.ItemFactory.HotLoadRecoveryComplete;
+                }
+                Patches.ClassAuraPersistence.RestoreAfterCharacterLoad();
+                FreshCharacterState.ClearIneligibleLoadedAura(out _);
+                Features.CorpseRunSystem.OnCharacterLoaded();
+                Necromancer.NecromancerPetEquipment.Load();
                 Log.LogInfo($"Skills loaded for '{charName}' (character switch)");
+
+                // Apply catch-up for pre-existing characters on first load,
+                // or when ForceCatchUpOnNextLoad is enabled
+                try
+                {
+                    bool isFirstLoad = SkillsSaveManager.Data.LastKnownPlayerLevel == 0;
+                    bool forceIt = CfgForceCatchUp.Value;
+
+                    if (isFirstLoad || forceIt)
+                    {
+                        int pLevel = GameData.PlayerStats?.Level ?? 0;
+                        string pClass = GameData.PlayerStats?.CharacterClass?.ClassName ?? "";
+                        if (pLevel > 1 && !string.IsNullOrEmpty(pClass))
+                        {
+                            SkillsSaveManager.Data.ApplyCatchUpLevels(pLevel, pClass);
+                            SkillsSaveManager.Save();
+                        }
+
+                        // Auto-reset the force flag so it doesn't re-apply every login
+                        if (forceIt)
+                        {
+                            CfgForceCatchUp.Value = false;
+                            Log.LogInfo("ForceCatchUpOnNextLoad reset to false.");
+                        }
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    Log.LogWarning($"Catch-up skill application failed: {ex.Message}");
+                }
             }
         }
 
@@ -405,35 +791,24 @@ namespace ErenshorSkills
             {
                 Items.ItemFactory.SaveCustomInventory();
                 SkillsSaveManager.Save();
+                Necromancer.NecromancerPetEquipment.Save();
                 Log.LogInfo("Saved skills on application quit.");
             }
             catch { }
         }
 
-        /// <summary>
-        /// Coroutine that polls input every frame as a backup in case Update() doesn't fire.
-        /// </summary>
-        private IEnumerator InputPollingCoroutine()
-        {
-            DebugLog("InputPollingCoroutine started");
-            Log.LogInfo("Classic Skills: Input coroutine started.");
-            int frame = 0;
-            while (true)
-            {
-                try
-                {
-                    frame++;
-                    if (frame == 30)
-                    {
-                        DebugLog($"Coroutine running at frame {frame}");
-                        Log.LogInfo($"Classic Skills: Coroutine confirmed running (frame {frame}).");
-                    }
-                    // Input handling is done in Update() — coroutine is just a heartbeat check
-                }
-                catch { }
+    }
 
-                yield return null;
-            }
-        }
+    /// <summary>
+    /// Tracks pointer focus over addon windows without borrowing Erenshor's
+    /// PlayerTyping flag. Borrowing that global flag could cancel real chat input.
+    /// </summary>
+    internal static class AddonInputState
+    {
+        private static int _pointerBlocks;
+        internal static bool PointerOverAddon => _pointerBlocks > 0;
+        internal static void Enter() { if (_pointerBlocks < int.MaxValue) _pointerBlocks++; }
+        internal static void Exit() { if (_pointerBlocks > 0) _pointerBlocks--; }
+        internal static void Reset() { _pointerBlocks = 0; }
     }
 }

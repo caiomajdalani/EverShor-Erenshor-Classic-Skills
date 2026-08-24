@@ -11,7 +11,7 @@ namespace ErenshorSkills.Skills
     /// Erenshor weapon → Skill mapping:
     ///   1H Slashing  — Swords, Axes, Blades, Whipsword
     ///   1H Blunt     — Maces, Clubs, Torches, Steins
-    ///   Piercing     — Daggers, Knives, Spikes, Picks, Claws
+    ///   Piercing     — Daggers, Knives, Rapiers, Spikes, Picks
     ///   2H Slashing  — Greatswords, Halberds, Claymores, 2H Axes
     ///   2H Blunt     — Staves, Great Maces, Poles, Totems
     ///   Archery      — Bows (all types)
@@ -47,7 +47,7 @@ namespace ErenshorSkills.Skills
             if (string.IsNullOrEmpty(weaponName))
                 return WeaponType.HandToHand;
 
-            string lower = weaponName.ToLower();
+            string lower = weaponName.ToLowerInvariant();
 
             // ── Bows ────────────────────────────────────────────────
             if (lower.Contains("bow") || lower.Contains("seastring"))
@@ -61,11 +61,19 @@ namespace ErenshorSkills.Skills
                 lower.Contains("sceptre") || lower.Contains("scepter"))
                 return WeaponType.Wands;
 
+            // Shields are equipment, not weapons. Check before broad tokens
+            // such as "stone" that are also used by blunt weapons.
+            if (lower.Contains("shield") || lower.Contains("buckler") ||
+                lower.Contains("bulwark") || lower.Contains("defender"))
+                return WeaponType.Unknown;
+
             // ── 2-Handed weapons ────────────────────────────────────
             if (isTwoHand)
             {
-                if (lower.Contains("staff") || lower.Contains("pole") ||
-                    lower.Contains("totem") || lower.Contains("heavy bladed mace") ||
+                if (lower.Contains("staff") || lower.Contains("stave") ||
+                    lower.Contains("pole") || lower.Contains("totem") ||
+                    lower.Contains("mace") || lower.Contains("maul") ||
+                    lower.Contains("hammer") || lower.Contains("flail") ||
                     lower.Contains("humanbone") || lower.Contains("spidersmasher") ||
                     lower.Contains("stirrer"))
                     return WeaponType.TwoHandBlunt;
@@ -75,12 +83,17 @@ namespace ErenshorSkills.Skills
 
             // ── Hand to Hand ────────────────────────────────────────
             if (lower.Contains("fist") || lower.Contains("fistwrap") ||
-                lower.Contains("claw") || lower.Contains("cryptid"))
+                lower.Contains("handwrap") || lower.Contains("hand wrap") ||
+                lower.Contains("knuckle") || lower.Contains("cestus") ||
+                lower.Contains("caestus") || lower.Contains("claw") ||
+                lower.Contains("cryptid"))
                 return WeaponType.HandToHand;
 
             // ── Piercing ────────────────────────────────────────────
             if (lower.Contains("dagger") || lower.Contains("knife") ||
-                lower.Contains("spike") || lower.Contains("pick") ||
+                lower.Contains("dirk") || lower.Contains("rapier") ||
+                lower.Contains("kukri") || lower.Contains("spike") ||
+                lower.Contains("pick") ||
                 lower.Contains("priel") || lower.Contains("eviscerator") ||
                 lower.Contains("asp") || lower.Contains("stiletto") ||
                 lower.Contains("shiv") || lower.Contains("gourd carver") ||
@@ -89,7 +102,8 @@ namespace ErenshorSkills.Skills
 
             // ── 1H Blunt (no longer includes wands) ─────────────────
             if (lower.Contains("mace") || lower.Contains("club") ||
-                lower.Contains("torch") ||
+                lower.Contains("hammer") || lower.Contains("maul") ||
+                lower.Contains("flail") || lower.Contains("torch") ||
                 lower.Contains("stein") || lower.Contains("bouquet") ||
                 lower.Contains("bundle") || lower.Contains("stone") ||
                 lower.Contains("idol") || lower.Contains("jellystick") ||
@@ -107,10 +121,32 @@ namespace ErenshorSkills.Skills
                 lower.Contains("whip"))
                 return WeaponType.OneHandSlash;
 
-            if (lower.Contains("shield") || lower.Contains("buckler"))
-                return WeaponType.Unknown;
-
             return WeaponType.OneHandSlash;
+        }
+
+        /// <summary>
+        /// Classify with authoritative item flags when available. This catches
+        /// bows and wands whose names do not contain those words and prevents a
+        /// secondary-slot shield from earning weapon skill XP.
+        /// </summary>
+        public static WeaponType ClassifyWeapon(Item weapon, bool isTwoHand)
+        {
+            if (weapon == null || weapon == GameData.PlayerInv?.Empty ||
+                string.IsNullOrWhiteSpace(weapon.ItemName) ||
+                string.Equals(weapon.ItemName, "Empty",
+                    StringComparison.OrdinalIgnoreCase))
+                return WeaponType.HandToHand;
+            if (Monk.MonkGear.IsHandwrap(weapon))
+                return WeaponType.HandToHand;
+            if (weapon.Shield) return WeaponType.Unknown;
+            if (weapon.IsBow || weapon.ThisWeaponType == Item.WeaponType.TwoHandBow)
+                return WeaponType.Archery;
+            if (weapon.IsWand) return WeaponType.Wands;
+
+            bool authoritativeTwoHand = isTwoHand ||
+                weapon.ThisWeaponType == Item.WeaponType.TwoHandMelee ||
+                weapon.ThisWeaponType == Item.WeaponType.TwoHandStaff;
+            return ClassifyWeapon(weapon.ItemName, authoritativeTwoHand);
         }
 
         public static SkillEntry GetSkillForType(WeaponType type)
@@ -147,15 +183,15 @@ namespace ErenshorSkills.Skills
         }
 
         /// <summary>
-        /// Damage multiplier: +0.2% per level (configurable).
-        /// Level 50 = +10% damage. Conservative but meaningful.
+        /// Damage multiplier based on the configured percentage per level.
         /// </summary>
         public static float GetDamageMultiplier(WeaponType type)
         {
             if (!SkillsPlugin.CfgEnableCombatSkills.Value) return 1f;
             var skill = GetSkillForType(type);
             if (skill == null) return 1f;
-            float bonusPct = skill.Level * SkillsPlugin.CfgCombatSkillDamagePerLevel.Value;
+            float bonusPct = skill.Level * Mathf.Max(0f,
+                SkillsPlugin.CfgCombatSkillDamagePerLevel.Value);
             return 1f + bonusPct / 100f;
         }
 
@@ -163,9 +199,29 @@ namespace ErenshorSkills.Skills
         public static void OnWeaponHit(string weaponName, bool isTwoHand,
             float damageDealt)
         {
-            if (!SkillsPlugin.CfgEnableCombatSkills.Value) return;
+            AwardWeaponHit(ClassifyWeapon(weaponName, isTwoHand), damageDealt);
+        }
 
-            WeaponType type = ClassifyWeapon(weaponName, isTwoHand);
+        public static void OnWeaponHit(Item weapon, bool isTwoHand,
+            float damageDealt)
+        {
+            AwardWeaponHit(ClassifyWeapon(weapon, isTwoHand), damageDealt);
+        }
+
+        /// <summary>
+        /// Award XP for a martial technique that resolves its own damage
+        /// instead of going through PlayerCombat.PerformAttacks. Monk
+        /// techniques take that route, so without this they train no combat
+        /// skill at all no matter how many are used.
+        /// </summary>
+        public static void OnTechniqueHit(WeaponType type, float damageDealt)
+        {
+            AwardWeaponHit(type, damageDealt);
+        }
+
+        private static void AwardWeaponHit(WeaponType type, float damageDealt)
+        {
+            if (!SkillsPlugin.CfgEnableCombatSkills.Value) return;
             if (type == WeaponType.Unknown) return;
 
             var skill = GetSkillForType(type);
@@ -211,7 +267,8 @@ namespace ErenshorSkills.Skills
             for (int i = 0; i < names.Length; i++)
             {
                 // Compute bonus directly from skill level × config value
-                float bonus = skills[i].Level * SkillsPlugin.CfgCombatSkillDamagePerLevel.Value;
+                float bonus = skills[i].Level * Mathf.Max(0f,
+                    SkillsPlugin.CfgCombatSkillDamagePerLevel.Value);
                 result.Add(new CombatSkillInfo(names[i], skills[i], bonus));
             }
 

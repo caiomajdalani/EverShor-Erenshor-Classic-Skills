@@ -14,15 +14,17 @@ namespace ErenshorSkills
     {
         public static void DumpAll()
         {
-            string dir = Path.Combine(BepInEx.Paths.ConfigPath, "ClassicSkills", "dumps");
+            string dir = Path.Combine(RuntimePaths.DataDirectory, "dumps");
             Directory.CreateDirectory(dir);
 
             int items = DumpItems(Path.Combine(dir, "items.csv"));
             int spells = DumpSpells(Path.Combine(dir, "spells.csv"));
             int skills = DumpSkills(Path.Combine(dir, "skills.csv"));
             int npcs = DumpNPCs(Path.Combine(dir, "npcs.csv"));
+            int acquisition = DumpSpellAcquisition(Path.Combine(dir,
+                "spell_acquisition.csv"));
 
-            ChatHelper.Send($"<color=#00FF00>[DB Dump]</color> Exported {items} items, {spells} spells, {skills} skills, {npcs} NPCs to:");
+            ChatHelper.Send($"<color=#00FF00>[DB Dump]</color> Exported {items} items, {spells} spells, {skills} skills, {npcs} live NPCs, and {acquisition} spell-acquisition rows to:");
             ChatHelper.Send($"<color=#AAAAAA>{dir}</color>");
         }
 
@@ -212,6 +214,121 @@ namespace ErenshorSkills
             }
             File.WriteAllText(path, sb.ToString());
             return count;
+        }
+
+        /// <summary>
+        /// Audits every Resources/NPCs prefab, not only the currently loaded
+        /// zone. This gives the add-on a source-backed reference for which
+        /// native spell scrolls are merchant stock, mob drops, or raid drops.
+        /// </summary>
+        static int DumpSpellAcquisition(string path)
+        {
+            Item[] itemDb = GameData.ItemDB?.ItemDB;
+            if (itemDb == null || itemDb.Length == 0) return 0;
+
+            var vendorSources = new Dictionary<string, List<string>>(
+                StringComparer.OrdinalIgnoreCase);
+            var lootSources = new Dictionary<string, List<string>>(
+                StringComparer.OrdinalIgnoreCase);
+            GameObject[] prefabs = Resources.LoadAll<GameObject>("NPCs");
+            foreach (GameObject prefab in prefabs)
+            {
+                if (prefab == null) continue;
+                NPC npc = prefab.GetComponent<NPC>();
+                Stats stats = prefab.GetComponent<Stats>();
+                string npcName = npc?.NPCName;
+                if (string.IsNullOrWhiteSpace(npcName))
+                    npcName = stats?.MyName;
+                if (string.IsNullOrWhiteSpace(npcName))
+                    npcName = prefab.name;
+                int level = stats?.Level ?? 0;
+                string source = npcName + " (L" + level + ")";
+
+                VendorInventory vendor = prefab.GetComponent<VendorInventory>();
+                if (vendor?.ItemsForSale != null)
+                    foreach (Item item in vendor.ItemsForSale)
+                        AddAcquisitionSource(vendorSources, item, source);
+
+                LootTable loot = prefab.GetComponent<LootTable>();
+                if (loot == null) continue;
+                AddAcquisitionSources(lootSources, loot.GuaranteeOneDrop,
+                    source + " guaranteed");
+                AddAcquisitionSources(lootSources, loot.CommonDrop,
+                    source + " common");
+                AddAcquisitionSources(lootSources, loot.UncommonDrop,
+                    source + " uncommon");
+                AddAcquisitionSources(lootSources, loot.RareDrop,
+                    source + " rare");
+                AddAcquisitionSources(lootSources, loot.LegendaryDrop,
+                    source + " legendary");
+                AddAcquisitionSources(lootSources, loot.UltraRareDrop,
+                    source + " ultra-rare");
+            }
+
+            var output = new StringBuilder();
+            output.AppendLine("ItemId,Scroll,Spell,RequiredLevel,Value,Classes,VendorSources,LootSources");
+            int count = 0;
+            foreach (Item item in itemDb)
+            {
+                if (item?.TeachSpell == null) continue;
+                string classes = "";
+                if (item.Classes != null)
+                {
+                    var names = new List<string>();
+                    foreach (Class value in item.Classes)
+                        if (value != null) names.Add(value.ClassName ?? "?");
+                    classes = string.Join(";", names);
+                }
+                string key = AcquisitionKey(item);
+                vendorSources.TryGetValue(key, out List<string> vendors);
+                lootSources.TryGetValue(key, out List<string> drops);
+                output.AppendLine($"{Esc(item.Id)},{Esc(item.ItemName)}," +
+                    $"{Esc(item.TeachSpell.SpellName)}," +
+                    $"{item.TeachSpell.RequiredLevel},{item.ItemValue}," +
+                    $"{Esc(classes)},{Esc(JoinSources(vendors))}," +
+                    $"{Esc(JoinSources(drops))}");
+                count++;
+            }
+            File.WriteAllText(path, output.ToString());
+            return count;
+        }
+
+        static void AddAcquisitionSources(
+            Dictionary<string, List<string>> destination, List<Item> items,
+            string source)
+        {
+            if (items == null) return;
+            foreach (Item item in items)
+                AddAcquisitionSource(destination, item, source);
+        }
+
+        static void AddAcquisitionSource(
+            Dictionary<string, List<string>> destination, Item item,
+            string source)
+        {
+            if (item?.TeachSpell == null) return;
+            string key = AcquisitionKey(item);
+            if (!destination.TryGetValue(key, out List<string> sources))
+            {
+                sources = new List<string>();
+                destination[key] = sources;
+            }
+            if (!sources.Contains(source)) sources.Add(source);
+        }
+
+        static string AcquisitionKey(Item item)
+        {
+            if (item == null) return "";
+            return !string.IsNullOrWhiteSpace(item.Id)
+                ? item.Id
+                : item.ItemName ?? "";
+        }
+
+        static string JoinSources(List<string> sources)
+        {
+            if (sources == null || sources.Count == 0) return "";
+            sources.Sort(StringComparer.OrdinalIgnoreCase);
+            return string.Join(";", sources);
         }
 
         static string ItemListStr(List<Item> items)

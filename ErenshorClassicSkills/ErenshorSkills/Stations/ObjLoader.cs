@@ -6,6 +6,26 @@ using UnityEngine;
 
 namespace ErenshorSkills.Stations
 {
+    /// <summary>Owns runtime-created Unity assets that a destroyed station
+    /// would otherwise leave allocated until process exit.</summary>
+    public sealed class RuntimeGeneratedAssets : MonoBehaviour
+    {
+        private readonly List<UnityEngine.Object> _assets =
+            new List<UnityEngine.Object>();
+
+        public void Track(UnityEngine.Object asset)
+        {
+            if (asset != null && !_assets.Contains(asset)) _assets.Add(asset);
+        }
+
+        private void OnDestroy()
+        {
+            foreach (var asset in _assets)
+                if (asset != null) UnityEngine.Object.Destroy(asset);
+            _assets.Clear();
+        }
+    }
+
     /// <summary>
     /// Runtime OBJ file loader. Parses .obj files and creates Unity Mesh objects.
     /// Supports vertices, normals, UVs, and textured materials via .png files.
@@ -33,6 +53,7 @@ namespace ErenshorSkills.Stations
                 var triNorms = new List<Vector3>();
                 var triUVs = new List<Vector2>();
                 var triIndices = new List<int>();
+                int invalidRecords = 0;
 
                 foreach (var rawLine in lines)
                 {
@@ -44,26 +65,44 @@ namespace ErenshorSkills.Stations
 
                     if (parts[0] == "v" && parts.Length >= 4)
                     {
-                        positions.Add(new Vector3(
-                            P(parts[1]), P(parts[2]), P(parts[3])));
+                        if (TryParseFloat(parts[1], out float x) &&
+                            TryParseFloat(parts[2], out float y) &&
+                            TryParseFloat(parts[3], out float z))
+                            positions.Add(new Vector3(x, y, z));
+                        else invalidRecords++;
                     }
                     else if (parts[0] == "vn" && parts.Length >= 4)
                     {
-                        normals.Add(new Vector3(
-                            P(parts[1]), P(parts[2]), P(parts[3])));
+                        if (TryParseFloat(parts[1], out float x) &&
+                            TryParseFloat(parts[2], out float y) &&
+                            TryParseFloat(parts[3], out float z))
+                            normals.Add(new Vector3(x, y, z));
+                        else invalidRecords++;
                     }
                     else if (parts[0] == "vt" && parts.Length >= 3)
                     {
-                        uvs.Add(new Vector2(P(parts[1]), P(parts[2])));
+                        if (TryParseFloat(parts[1], out float x) &&
+                            TryParseFloat(parts[2], out float y))
+                            uvs.Add(new Vector2(x, y));
+                        else invalidRecords++;
                     }
                     else if (parts[0] == "f")
                     {
                         // Triangulate face (supports quads and n-gons)
                         var faceVerts = new List<int[]>();
+                        bool validFace = true;
                         for (int i = 1; i < parts.Length; i++)
                         {
-                            faceVerts.Add(ParseFaceVertex(parts[i]));
+                            if (!TryParseFaceVertex(parts[i], positions.Count,
+                                uvs.Count, normals.Count, out int[] faceVertex))
+                            {
+                                validFace = false;
+                                break;
+                            }
+                            faceVerts.Add(faceVertex);
                         }
+                        if (!validFace || faceVerts.Count < 3)
+                        { invalidRecords++; continue; }
                         // Fan triangulation
                         for (int i = 1; i < faceVerts.Count - 1; i++)
                         {
@@ -75,6 +114,13 @@ namespace ErenshorSkills.Stations
                                 triVerts, triNorms, triUVs, triIndices);
                         }
                     }
+                }
+
+                if (triVerts.Count == 0 || triIndices.Count == 0)
+                {
+                    SkillsPlugin.Log.LogWarning(
+                        $"ObjLoader: '{objPath}' contains no valid triangles.");
+                    return null;
                 }
 
                 // Build Unity mesh
@@ -101,22 +147,42 @@ namespace ErenshorSkills.Stations
 
                 // Create GameObject
                 var go = new GameObject(mesh.name);
+                var assets = go.AddComponent<RuntimeGeneratedAssets>();
+                assets.Track(mesh);
                 var mf = go.AddComponent<MeshFilter>();
                 mf.mesh = mesh;
                 var mr = go.AddComponent<MeshRenderer>();
 
                 // Load texture if provided — use double-sided rendering
-                var mat = new Material(Shader.Find("Standard"));
+                Shader shader = Shader.Find("Standard") ??
+                    Shader.Find("Legacy Shaders/Diffuse") ?? Shader.Find("Unlit/Texture");
+                if (shader == null)
+                {
+                    UnityEngine.Object.Destroy(go);
+                    SkillsPlugin.Log.LogError("ObjLoader: No compatible material shader is available.");
+                    return null;
+                }
+                var mat = new Material(shader);
+                assets.Track(mat);
                 mat.SetFloat("_Cull", 0); // Cull Off = render both sides
                 if (!string.IsNullOrEmpty(texturePath) && File.Exists(texturePath))
                 {
                     var texData = File.ReadAllBytes(texturePath);
                     var tex = new Texture2D(2, 2);
-                    tex.LoadImage(texData);
-                    tex.filterMode = FilterMode.Bilinear;
-                    mat.mainTexture = tex;
+                    if (ImageConversion.LoadImage(tex, texData))
+                    {
+                        tex.filterMode = FilterMode.Bilinear;
+                        mat.mainTexture = tex;
+                        assets.Track(tex);
+                    }
+                    else
+                    {
+                        UnityEngine.Object.Destroy(tex);
+                        SkillsPlugin.Log.LogWarning(
+                            $"ObjLoader: Ignored invalid texture '{texturePath}'.");
+                    }
                 }
-                mr.material = mat;
+                mr.sharedMaterial = mat;
 
                 // Add collider for interaction
                 var bc = go.AddComponent<BoxCollider>();
@@ -124,7 +190,8 @@ namespace ErenshorSkills.Stations
                 bc.size = mesh.bounds.size;
 
                 SkillsPlugin.Log.LogInfo(
-                    $"ObjLoader: Loaded {mesh.name} ({triVerts.Count} verts, {triIndices.Count / 3} tris)");
+                    $"ObjLoader: Loaded {mesh.name} ({triVerts.Count} verts, " +
+                    $"{triIndices.Count / 3} tris, {invalidRecords} invalid records skipped)");
                 return go;
             }
             catch (Exception ex)
@@ -134,16 +201,52 @@ namespace ErenshorSkills.Stations
             }
         }
 
-        static float P(string s) => float.Parse(s, NumberStyles.Float, CultureInfo.InvariantCulture);
+        static bool TryParseFloat(string value, out float result)
+        {
+            return float.TryParse(value, NumberStyles.Float,
+                CultureInfo.InvariantCulture, out result) &&
+                !float.IsNaN(result) && !float.IsInfinity(result);
+        }
 
-        static int[] ParseFaceVertex(string s)
+        static bool TryParseFaceVertex(string value, int positionCount,
+            int uvCount, int normalCount, out int[] result)
         {
             // Formats: v, v/vt, v/vt/vn, v//vn
-            var parts = s.Split('/');
-            int v = int.Parse(parts[0]) - 1; // OBJ is 1-indexed
-            int vt = parts.Length > 1 && parts[1].Length > 0 ? int.Parse(parts[1]) - 1 : -1;
-            int vn = parts.Length > 2 && parts[2].Length > 0 ? int.Parse(parts[2]) - 1 : -1;
-            return new[] { v, vt, vn };
+            result = null;
+            var parts = value.Split('/');
+            if (parts.Length < 1 || parts.Length > 3 ||
+                !int.TryParse(parts[0], NumberStyles.Integer,
+                    CultureInfo.InvariantCulture, out int rawPosition)) return false;
+            int position = ResolveObjIndex(rawPosition, positionCount);
+            if (position < 0) return false;
+
+            int uv = -1;
+            if (parts.Length > 1 && parts[1].Length > 0)
+            {
+                if (!int.TryParse(parts[1], NumberStyles.Integer,
+                    CultureInfo.InvariantCulture, out int rawUv)) return false;
+                uv = ResolveObjIndex(rawUv, uvCount);
+                if (uv < 0) return false;
+            }
+
+            int normal = -1;
+            if (parts.Length > 2 && parts[2].Length > 0)
+            {
+                if (!int.TryParse(parts[2], NumberStyles.Integer,
+                    CultureInfo.InvariantCulture, out int rawNormal)) return false;
+                normal = ResolveObjIndex(rawNormal, normalCount);
+                if (normal < 0) return false;
+            }
+            result = new[] { position, uv, normal };
+            return true;
+        }
+
+        static int ResolveObjIndex(int index, int count)
+        {
+            if (index > 0) index--;
+            else if (index < 0) index = count + index;
+            else return -1;
+            return index >= 0 && index < count ? index : -1;
         }
 
         static void AddVertex(int[] face, List<Vector3> positions,

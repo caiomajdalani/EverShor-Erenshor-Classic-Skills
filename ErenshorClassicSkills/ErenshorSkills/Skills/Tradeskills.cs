@@ -72,6 +72,15 @@ namespace ErenshorSkills.Skills
             }
         }
 
+        private sealed class BankMutation
+        {
+            public string Path;
+            public string BeforeJson;
+            public BankReadData Data;
+            public bool Dirty;
+            public string AfterJson => Dirty ? JsonUtility.ToJson(Data) : BeforeJson;
+        }
+
         // ═════════════════════════════════════════════════════════════
         // Attempt a combine
         // ═════════════════════════════════════════════════════════════
@@ -95,7 +104,7 @@ namespace ErenshorSkills.Skills
             {
                 ChatHelper.Send(
                     $"<color=#FF9800>[{tradeskill}]</color> " +
-                    $"Unknown recipe: '{recipeName}'. Type /{tradeskill.ToLower()} list " +
+                    $"Unknown recipe: '{recipeName}'. Type /{tradeskill.ToLowerInvariant()} list " +
                     $"to see available recipes.");
                 return;
             }
@@ -130,17 +139,50 @@ namespace ErenshorSkills.Skills
                 return;
             }
 
-            // Consume materials
-            ConsumeMaterials(recipe);
-
-            skill.TimesUsed++;
-
             // Calculate success chance
             // Base 40% + 1% per level above minimum, capped at 95%
-            float chance = 40f + (skill.Level - recipe.MinSkillLevel) * 1.5f;
-            chance = Mathf.Clamp(chance, 15f, 95f);
+            float chance = GetSuccessChance(skill, recipe);
 
             bool success = UnityEngine.Random.value * 100f < chance;
+
+            var mutation = Items.BagSystem.BeginExternalMutation();
+            BankMutation bankMutation = null;
+            try
+            {
+                bankMutation = BeginBankMutation();
+                if (!ConsumeMaterials(recipe, bankMutation))
+                    throw new InvalidOperationException("Required materials changed during the combine.");
+
+                if (success && !TryGiveItem(recipe))
+                    throw new InvalidOperationException(
+                        $"There is no safe inventory slot for {recipe.Name}.");
+
+                string bankPath = bankMutation?.Dirty == true ? bankMutation.Path : null;
+                string bankBefore = bankMutation?.Dirty == true ? bankMutation.BeforeJson : null;
+                string bankAfter = bankMutation?.Dirty == true ? bankMutation.AfterJson : null;
+                if (!Items.BagSystem.CommitExternalMutation(
+                    $"craft-{tradeskill}", mutation, bankPath, bankBefore, bankAfter))
+                    throw new InvalidOperationException("The inventory transaction could not be saved.");
+
+                if (bankMutation?.Dirty == true)
+                    ReloadBankIfPresent();
+            }
+            catch (Exception ex)
+            {
+                Items.BagSystem.RollbackExternalMutation(mutation,
+                    bankMutation?.Dirty == true ? bankMutation.Path : null,
+                    bankMutation?.Dirty == true ? bankMutation.BeforeJson : null);
+                if (bankMutation?.Dirty == true)
+                    ReloadBankIfPresent();
+                SkillsPlugin.Log.LogError($"{tradeskill} combine rolled back: {ex}");
+                ChatHelper.Send(
+                    $"<color=#FF9800>[{tradeskill}]</color> " +
+                    $"<color=#EF5350>The combine was cancelled and all materials were restored: " +
+                    $"{ex.Message}</color>");
+                return;
+            }
+
+            skill.TimesUsed++;
 
             if (success)
             {
@@ -148,9 +190,6 @@ namespace ErenshorSkills.Skills
 
                 // Tradeskill XP uses the trivial system
                 SkillXpEngine.AwardTradeskillXp(skill, recipe.XpOnSuccess, recipe.TrivialLevel);
-
-                // Give the crafted item (or gold value as fallback)
-                TryGiveItem(recipe);
 
                 ChatHelper.Send(
                     $"<color=#FF9800>[{tradeskill}]</color> " +
@@ -207,23 +246,22 @@ namespace ErenshorSkills.Skills
                 return;
             }
 
-            // Must have the item in inventory
-            int have = 0;
-            try
+            var inventory = GameData.PlayerInv;
+            ItemIcon sourceSlot = null;
+            if (inventory?.StoredSlots != null)
             {
-                var inv = GameData.PlayerInv;
-                if (inv?.StoredSlots != null)
+                foreach (var slot in inventory.StoredSlots)
                 {
-                    foreach (var slot in inv.StoredSlots)
+                    if (slot?.MyItem != null && slot.MyItem != inventory.Empty &&
+                        slot.MyItem.ItemName == itemName)
                     {
-                        if (slot?.MyItem != null && slot.MyItem.ItemName == itemName)
-                        { have += Mathf.Max(1, slot.Quantity); break; }
+                        sourceSlot = slot;
+                        break;
                     }
                 }
             }
-            catch { }
 
-            if (have <= 0)
+            if (sourceSlot == null)
             {
                 ChatHelper.Send(
                     $"<color=#FF9800>[{tradeskill}]</color> " +
@@ -231,23 +269,13 @@ namespace ErenshorSkills.Skills
                 return;
             }
 
-            // Remove the item from inventory
-            try
+            if (Items.BagSystem.IsBag(sourceSlot.MyItem))
             {
-                var inv = GameData.PlayerInv;
-                foreach (var slot in inv.StoredSlots)
-                {
-                    if (slot?.MyItem != null && slot.MyItem.ItemName == itemName)
-                    {
-                        slot.Quantity--;
-                        if (slot.Quantity <= 0)
-                            slot.MyItem = GameData.PlayerInv.Empty;
-                        slot.UpdateSlotImage();
-                        break;
-                    }
-                }
+                ChatHelper.Send(
+                    $"<color=#FF9800>[{tradeskill}]</color> " +
+                    "<color=#EF5350>Bags cannot be deconstructed. Their contents and identity are protected.</color>");
+                return;
             }
-            catch { }
 
             // Calculate recovery chance per material based on skill level
             // Base: 30% at min skill level, scales to 80% at 50 levels above recipe
@@ -255,7 +283,7 @@ namespace ErenshorSkills.Skills
             float baseChance = Mathf.Clamp(0.30f + skillDiff * 0.01f, 0.15f, 0.80f);
 
             // Roll for each material
-            var recovered = new List<string>();
+            var recoveredAmounts = new List<(string name, int amount)>();
             for (int i = 0; i < recipe.Materials.Length; i++)
             {
                 string matName = recipe.Materials[i];
@@ -267,20 +295,53 @@ namespace ErenshorSkills.Skills
                         got++;
                 }
                 if (got > 0)
+                    recoveredAmounts.Add((matName, got));
+            }
+
+            var mutation = Items.BagSystem.BeginExternalMutation();
+            try
+            {
+                if (sourceSlot.MyItem.Stackable && sourceSlot.Quantity > 1)
+                    sourceSlot.Quantity--;
+                else
                 {
-                    // Give materials back
-                    for (int k = 0; k < got; k++)
-                        Items.ItemFactory.GiveItemToPlayer(matName);
-                    recovered.Add($"{got}x {matName}");
+                    sourceSlot.MyItem = inventory.Empty;
+                    sourceSlot.Quantity = 1;
                 }
+                sourceSlot.UpdateSlotImage();
+
+                foreach (var recovered in recoveredAmounts)
+                {
+                    if (!Items.ItemFactory.GiveItemToPlayer(
+                        recovered.name, recovered.amount))
+                        throw new InvalidOperationException(
+                            $"There is not enough inventory space for {recovered.name}.");
+                }
+
+                if (!Items.BagSystem.CommitExternalMutation(
+                    $"deconstruct-{tradeskill}", mutation))
+                    throw new InvalidOperationException("The inventory transaction could not be saved.");
+            }
+            catch (Exception ex)
+            {
+                Items.BagSystem.RollbackExternalMutation(mutation);
+                SkillsPlugin.Log.LogError($"{tradeskill} deconstruction rolled back: {ex}");
+                ChatHelper.Send(
+                    $"<color=#FF9800>[{tradeskill}]</color> " +
+                    $"<color=#EF5350>Deconstruction was cancelled and the item was restored: " +
+                    $"{ex.Message}</color>");
+                return;
             }
 
             // Award small XP for deconstructing
             float xp = 2f + recipe.MinSkillLevel * 0.1f;
             SkillXpEngine.AwardTradeskillXp(skill, xp, recipe.TrivialLevel);
 
-            if (recovered.Count > 0)
+            if (recoveredAmounts.Count > 0)
             {
+                var recovered = new List<string>();
+                foreach (var entry in recoveredAmounts)
+                    recovered.Add($"{entry.amount}x {entry.name}");
                 string matList = string.Join(", ", recovered);
                 ChatHelper.Send(
                     $"<color=#FF9800>[{tradeskill}]</color> " +
@@ -330,8 +391,6 @@ namespace ErenshorSkills.Skills
             }
 
             ChatHelper.Send(
-                $"<color=#AAAAAA>Use /{tradeskill.ToLower()} make <name> to craft.</color>");
-            ChatHelper.Send(
                 $"<color=#FF9800>═══════════════════════════</color>");
         }
 
@@ -343,6 +402,19 @@ namespace ErenshorSkills.Skills
         public static List<Recipe> GetRecipesForSkillPublic(string tradeskill)
         {
             return GetRecipesForSkill(tradeskill);
+        }
+
+        /// <summary>
+        /// Single authoritative success calculation shared by crafting and UI.
+        /// Keeping the displayed and rolled values on the same path prevents
+        /// percentage drift when tuning the formula.
+        /// </summary>
+        public static float GetSuccessChance(SkillEntry skill, Recipe recipe)
+        {
+            if (skill == null || recipe == null) return 0f;
+            return Mathf.Clamp(
+                40f + (skill.Level - recipe.MinSkillLevel) * 1.5f,
+                15f, 95f);
         }
 
         private static List<Recipe> GetRecipesForSkill(string tradeskill)
@@ -399,7 +471,7 @@ namespace ErenshorSkills.Skills
                     "Fine wire for jewelry settings. Used in Jewelcraft.", 30),
                 new Recipe("Forged Shield Boss", "Smithing", 30, 50,
                     new[] { "Chunk of Iron Ore", "Chunk of Copper Ore", "Coal" }, new[] { 3, 1, 3 },
-                    "Heavy center piece for a shield. +AC when equipped.", 45),
+                    "Heavy shield centerpiece. +8 AC, +18 HP, +7 End.", 45),
                 new Recipe("Hardened Alloy Ingot", "Smithing", 40, 50,
                     new[] { "Malaroth Scale Fragment", "Coal", "Obsidian Shard" }, new[] { 2, 4, 1 },
                     "Dense alloy infused with dragon essence. Premium smithing material.", 80),
@@ -1122,12 +1194,16 @@ namespace ErenshorSkills.Skills
                 new Recipe("Stitched Leather Gloves", "Tailoring", 1, 15,
                     new[] { "Worn Leather Scrap", "Tangled String" }, new[] { 2, 2 },
                     "Double-stitched leather protects the knuckles without sacrificing grip.", 5),
+                new Recipe("Reinforced Linen Knuckles", "Tailoring", 5, 20,
+                    new[] { "Worn Leather Scrap", "Spider Silk Strand", "Tangled String" },
+                    new[] { 2, 1, 2 },
+                    "Level 4 Monk handwraps with stitched leather striking pads.", 85),
                 new Recipe("Padded Cloth Cap", "Tailoring", 3, 18,
                     new[] { "Spider Silk Strand", "Tangled String" }, new[] { 2, 1 },
                     "Padded layers of cloth offer modest protection from blows to the head.", 7),
                 new Recipe("Silken Pouch", "Tailoring", 5, 18,
                     new[] { "Spider Silk Strand", "Tangled String" }, new[] { 2, 1 },
-                    "A fine silk pouch. Used as a crafting component. Sells well.", 8),
+                    "Right-click to open. 4 item slots.", 8),
                 new Recipe("Herbalist's Satchel", "Tailoring", 10, 25,
                     new[] { "Spider Silk Strand", "Worn Leather Scrap", "Copper Rivets" }, new[] { 3, 2, 1 },
                     "Right-click to open. 6 item slots.", 18),
@@ -1146,6 +1222,10 @@ namespace ErenshorSkills.Skills
                 new Recipe("Blighthide Cloak", "Tailoring", 30, 45,
                     new[] { "Worn Leather Scrap", "Blightvein Moss", "Spider Silk Strand" }, new[] { 4, 2, 3 },
                     "Cured in blightvein oils. The leather repels toxins and shadow alike.", 60),
+                new Recipe("Silkstep Bindings", "Tailoring", 30, 48,
+                    new[] { "Spider Silk Strand", "Silken Grass Blade", "Copper Rivets" },
+                    new[] { 4, 2, 2 },
+                    "Level 10 Monk handwraps braided for speed and flexibility.", 600),
                 new Recipe("Azynthi Woven Mantle", "Tailoring", 42, 50,
                     new[] { "Spider Silk Strand", "Azynthi Petal", "Shimmer Herb" }, new[] { 6, 2, 1 },
                     "Living fibers from the Azynthi groves, woven by careful hands.", 130),
@@ -1155,12 +1235,20 @@ namespace ErenshorSkills.Skills
                 new Recipe("Ironbark Reinforced Vest", "Tailoring", 55, 75,
                     new[] { "Cured Tough Leather", "Ironbark Plank", "Steel Chain Links" }, new[] { 2, 1, 2 },
                     "Reinforced with strips of ironbark over hardened leather.", 50),
+                new Recipe("Blighthide Strikers", "Tailoring", 60, 80,
+                    new[] { "Cured Tough Leather", "Blightvein Moss", "Steel Chain Links" },
+                    new[] { 2, 2, 1 },
+                    "Level 16 Monk handwraps with cured thorn-hide guards.", 2200),
                 new Recipe("Abyssal Weave Cloth", "Tailoring", 65, 85,
                     new[] { "Abyssal Silk Thread", "Spider Silk Strand", "Kraken Ink Vial" }, new[] { 2, 3, 1 },
                     "Dark magic fabric. Used in higher crafts.", 50),
                 new Recipe("Frostweave Cloak", "Tailoring", 80, 100,
                     new[] { "Frostweave Strand", "Abyssal Weave Cloth", "Silver Wire" }, new[] { 2, 1, 1 },
                     "Threads of frostweave shimmer with trapped winter cold.", 80),
+                new Recipe("Ironbark Fistguards", "Tailoring", 90, 110,
+                    new[] { "Cured Tough Leather", "Ironbark Plank", "Reinforced Buckle" },
+                    new[] { 3, 2, 2 },
+                    "Level 22 Monk handwraps reinforced with riveted ironbark.", 5200),
                 new Recipe("Celestial Silk Bolt", "Tailoring", 95, 115,
                     new[] { "Celestial Fabric Bolt", "Abyssal Silk Thread", "Moonsilver Bar" }, new[] { 2, 2, 1 },
                     "Heavenly fabric. Used in endgame armor.", 70),
@@ -1170,12 +1258,20 @@ namespace ErenshorSkills.Skills
                 new Recipe("Voidweave Robe", "Tailoring", 125, 145,
                     new[] { "Abyssal Weave Cloth", "Breath of the Abyss", "Ethereal Gossamer" }, new[] { 2, 1, 2 },
                     "Woven from threads that drink the light. Whispers echo in its folds.", 220),
+                new Recipe("Frostweave Handwraps", "Tailoring", 125, 145,
+                    new[] { "Frostweave Strand", "Abyssal Weave Cloth", "Silver Wire" },
+                    new[] { 3, 2, 2 },
+                    "Level 28 Monk handwraps carrying a carefully bound frozen edge.", 12500),
                 new Recipe("Celestial Battle Mantle", "Tailoring", 140, 160,
                     new[] { "Celestial Silk Bolt", "Phoenix Feather", "Adamantite Rivets" }, new[] { 2, 1, 2 },
                     "A mantle of celestial silk that shimmers like a clear night sky.", 300),
                 new Recipe("Titan's War Harness", "Tailoring", 155, 175,
                     new[] { "Celestial Silk Bolt", "Titan's Knucklebone", "Soulsteel Chain Links" }, new[] { 2, 1, 2 },
                     "A titan's battle gear, sized for mortal shoulders. The weight is immense.", 400),
+                new Recipe("Celestial Silk Cestus", "Tailoring", 160, 178,
+                    new[] { "Celestial Silk Bolt", "Moonsilver Bar", "Soulsteel Chain Links" },
+                    new[] { 2, 1, 1 },
+                    "Level 36 Monk handwraps with light articulated celestial guards.", 36000),
                 new Recipe("Mantle of Eternity", "Tailoring", 170, 180,
                     new[] { "Thread of Fate", "Celestial Silk Bolt", "Crystallized Time" }, new[] { 1, 2, 1 },
                     "Neither thread nor fiber has aged since the day it was woven. Perhaps it never will.", 500),
@@ -1293,14 +1389,17 @@ namespace ErenshorSkills.Skills
             }
         }
 
-        private static Recipe FindRecipe(string tradeskill, string recipeName)
+        internal static Recipe FindRecipe(string tradeskill, string recipeName)
         {
+            if (string.IsNullOrWhiteSpace(tradeskill) ||
+                string.IsNullOrWhiteSpace(recipeName)) return null;
             var recipes = GetRecipesForSkill(tradeskill);
-            string lower = recipeName.ToLower();
             foreach (var r in recipes)
             {
-                if (r.Name.ToLower() == lower ||
-                    r.Name.ToLower().Contains(lower))
+                if (string.Equals(r.Name, recipeName,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    (r.Name?.IndexOf(recipeName,
+                        StringComparison.OrdinalIgnoreCase) ?? -1) >= 0)
                     return r;
             }
             return null;
@@ -1310,103 +1409,376 @@ namespace ErenshorSkills.Skills
         /// Check if the player has the required materials in inventory.
         /// Searches both the game's item database and foraged item names.
         /// </summary>
-        private static bool CheckMaterials(Recipe recipe)
+        internal static bool CheckMaterials(Recipe recipe)
         {
             try
             {
-                var inventory = GameData.PlayerInv;
-                if (inventory == null || inventory.StoredSlots == null) return false;
-
                 for (int i = 0; i < recipe.Materials.Length; i++)
                 {
                     string matName = recipe.Materials[i];
                     int required = recipe.MaterialCounts[i];
-                    int found = 0;
-
-                    foreach (var slot in inventory.StoredSlots)
-                    {
-                        if (slot != null && slot.MyItem != null &&
-                            slot.MyItem.ItemName == matName)
-                        {
-                            found += Mathf.Max(1, slot.Quantity);
-                        }
-                    }
-
+                    int found = CountMaterialAll(matName);
                     if (found < required) return false;
                 }
-
                 return true;
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
-        /// <summary>Remove materials from the player's inventory.</summary>
-        private static void ConsumeMaterials(Recipe recipe)
+        /// <summary>Count how many of a material the player has across all sources.</summary>
+        private static int CountMaterialAll(string matName)
+        {
+            long found = 0;
+
+            // 1. Player inventory
+            try
+            {
+                var inv = GameData.PlayerInv;
+                if (inv?.StoredSlots != null)
+                {
+                    foreach (var slot in inv.StoredSlots)
+                    {
+                        if (slot?.MyItem != null && slot.MyItem.ItemName == matName)
+                            found += slot.MyItem.Stackable ? Mathf.Max(1, slot.Quantity) : 1;
+                    }
+                }
+            }
+            catch { }
+
+            // 2. Bags (if enabled)
+            if (SkillsPlugin.CfgCraftFromBags.Value)
+            {
+                try
+                {
+                    found += Items.BagSystem.CountItemInAllBags(matName);
+                }
+                catch { }
+            }
+
+            // 3. Bank (if enabled)
+            if (SkillsPlugin.CfgCraftFromBank.Value)
+            {
+                try
+                {
+                    var bankItems = GetBankItemsSnapshot();
+                    if (bankItems != null)
+                    {
+                        foreach (var (name, qty) in bankItems)
+                        {
+                            if (name == matName)
+                                found += qty;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            return found > int.MaxValue ? int.MaxValue : (int)found;
+        }
+
+        /// <summary>
+        /// Remove materials from inventory, bags, then a staged bank copy.
+        /// Returns false if any source changed after the availability check.
+        /// The caller owns rollback/commit of the encompassing transaction.
+        /// </summary>
+        private static bool ConsumeMaterials(Recipe recipe, BankMutation bankMutation)
         {
             try
             {
-                var inventory = GameData.PlayerInv;
-                if (inventory == null || inventory.StoredSlots == null) return;
-
                 for (int i = 0; i < recipe.Materials.Length; i++)
                 {
                     string matName = recipe.Materials[i];
                     int toRemove = recipe.MaterialCounts[i];
 
-                    for (int j = inventory.StoredSlots.Count - 1;
-                         j >= 0 && toRemove > 0; j--)
-                    {
-                        var slot = inventory.StoredSlots[j];
-                        if (slot == null || slot.MyItem == null) continue;
-                        if (slot.MyItem.ItemName != matName) continue;
+                    // 1. Remove from inventory first
+                    toRemove = RemoveFromInventory(matName, toRemove);
 
-                        int qty = Mathf.Max(1, slot.Quantity);
-                        if (qty <= toRemove)
-                        {
-                            // Remove entire stack
-                            toRemove -= qty;
-                            slot.Quantity = 0;
-                            slot.MyItem = GameData.PlayerInv.Empty;
-                            slot.UpdateSlotImage();
-                        }
-                        else
-                        {
-                            // Reduce stack
-                            slot.Quantity -= toRemove;
-                            toRemove = 0;
-                            slot.UpdateSlotImage();
-                        }
+                    // 2. Remove from bags if needed and enabled
+                    if (toRemove > 0 && SkillsPlugin.CfgCraftFromBags.Value)
+                        toRemove = Items.BagSystem.RemoveItemFromAllBags(matName, toRemove);
+
+                    // 3. Remove from bank if needed and enabled
+                    if (toRemove > 0 && SkillsPlugin.CfgCraftFromBank.Value)
+                        toRemove = RemoveFromBank(bankMutation, matName, toRemove);
+
+                    if (toRemove > 0)
+                        return false;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogError($"ConsumeMaterials failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static int RemoveFromInventory(string matName, int toRemove)
+        {
+            try
+            {
+                var inv = GameData.PlayerInv;
+                if (inv?.StoredSlots == null) return toRemove;
+                for (int j = inv.StoredSlots.Count - 1; j >= 0 && toRemove > 0; j--)
+                {
+                    var slot = inv.StoredSlots[j];
+                    if (slot?.MyItem == null || slot.MyItem.ItemName != matName) continue;
+                    int qty = slot.MyItem.Stackable ? Mathf.Max(1, slot.Quantity) : 1;
+                    if (qty <= toRemove)
+                    {
+                        toRemove -= qty;
+                        slot.MyItem = GameData.PlayerInv.Empty;
+                        slot.Quantity = 1;
+                        slot.UpdateSlotImage();
+                    }
+                    else if (slot.MyItem.Stackable)
+                    {
+                        slot.Quantity -= toRemove;
+                        toRemove = 0;
+                        slot.UpdateSlotImage();
                     }
                 }
             }
             catch { }
+            return toRemove;
         }
 
-        /// <summary>Give the crafted item to the player via ItemFactory.</summary>
-        private static void TryGiveItem(Recipe recipe)
+        /// <summary>
+        /// Remove materials from the staged bank data. Disk is written only by
+        /// the shared crash-recovery transaction after inventory/bags are ready.
+        /// </summary>
+        private static int RemoveFromBank(BankMutation mutation,
+            string matName, int toRemove)
         {
             try
             {
-                if (!ErenshorSkills.Items.ItemFactory.GiveItemToPlayer(recipe.Name))
+                var saveData = mutation?.Data;
+                if (saveData?.BankData == null) return toRemove;
+
+                bool modified = false;
+                for (int i = saveData.BankData.Count - 1; i >= 0 && toRemove > 0; i--)
                 {
-                    // Fallback: award gold value
-                    var stats = GameData.PlayerStats;
-                    if (stats != null)
-                        GameData.PlayerInv.Gold += recipe.GoldValue;
+                    string itemId = saveData.BankData[i];
+                    if (string.IsNullOrEmpty(itemId)) continue;
+
+                    // Resolve ID to name
+                    string itemName = null;
+                    Item resolvedItem = null;
+                    if (itemId.StartsWith("CS_"))
+                    {
+                        resolvedItem = Items.ItemFactory.GetItemById(itemId);
+                        if (resolvedItem != null) itemName = resolvedItem.ItemName;
+                    }
+                    if (itemName == null)
+                    {
+                        resolvedItem = GameData.ItemDB?.GetItemByID(itemId);
+                        if (resolvedItem != null && resolvedItem != GameData.PlayerInv?.Empty)
+                            itemName = resolvedItem.ItemName;
+                    }
+                    if (itemName != matName) continue;
+
+                    int qty = resolvedItem?.Stackable == true && i < saveData.BankCount.Count
+                        ? Mathf.Max(1, saveData.BankCount[i]) : 1;
+                    if (qty <= toRemove)
+                    {
+                        toRemove -= qty;
+                        saveData.BankData[i] = "";
+                        if (i < saveData.BankCount.Count) saveData.BankCount[i] = 1;
+                    }
+                    else if (resolvedItem?.Stackable == true)
+                    {
+                        if (i < saveData.BankCount.Count) saveData.BankCount[i] -= toRemove;
+                        toRemove = 0;
+                    }
+                    modified = true;
+                }
+
+                if (modified)
+                    mutation.Dirty = true;
+            }
+            catch (Exception ex) { SkillsPlugin.Log.LogError($"RemoveFromBank error: {ex.Message}"); }
+            return toRemove;
+        }
+
+        private static BankMutation BeginBankMutation()
+        {
+            if (!SkillsPlugin.CfgCraftFromBank.Value) return null;
+            string path = GetBankPath();
+            if (path == null) return null;
+            try
+            {
+                if (!SafeFileIO.TryReadAllTextWithBackup(path, IsBankJsonValid,
+                    out string json, out bool recovered, out string error))
+                {
+                    SkillsPlugin.Log.LogError($"Bank data could not be read safely: {error}");
+                    return null;
+                }
+                var data = JsonUtility.FromJson<BankReadData>(json);
+                if (data?.BankData == null) return null;
+                if (data.BankCount == null) data.BankCount = new List<int>();
+                while (data.BankCount.Count < data.BankData.Count)
+                    data.BankCount.Add(1);
+                if (recovered)
+                    SkillsPlugin.Log.LogWarning("Recovered global bank data from backup before crafting.");
+                return new BankMutation { Path = path, BeforeJson = json, Data = data };
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogError($"Bank transaction setup failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        private static string GetBankPath()
+        {
+            string dataPath = Application.persistentDataPath;
+            string path1 = System.IO.Path.Combine(dataPath, "ESSaveData", "GBDATA");
+            string path2 = System.IO.Path.Combine(dataPath, "GBDATA");
+            return System.IO.File.Exists(path1) ? path1 :
+                System.IO.File.Exists(path2) ? path2 : null;
+        }
+
+        internal static bool IsBankJsonValid(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+                return false;
+            try
+            {
+                string value = json.Trim();
+                if (!value.StartsWith("{") || !value.EndsWith("}") ||
+                    System.Text.RegularExpressions.Regex.Matches(value,
+                        "\\\"BankData\\\"\\s*:").Count != 1 ||
+                    System.Text.RegularExpressions.Regex.Matches(value,
+                        "\\\"BankCount\\\"\\s*:").Count != 1) return false;
+                var data = JsonUtility.FromJson<BankReadData>(value);
+                if (data?.BankData == null || data.BankCount == null ||
+                    data.BankData.Count > 100000 ||
+                    data.BankCount.Count < data.BankData.Count ||
+                    data.BankCount.Count > 100000) return false;
+                for (int i = 0; i < data.BankData.Count; i++)
+                {
+                    if (data.BankData[i] == null || data.BankData[i].Length > 512 ||
+                        data.BankCount[i] <= 0) return false;
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static void ReloadBankIfPresent()
+        {
+            try
+            {
+                foreach (var component in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
+                {
+                    if (component.GetType().Name != "GlobalBank") continue;
+                    component.GetType().GetMethod("LoadBank")?.Invoke(component, null);
+                    break;
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                try
+                SkillsPlugin.Log.LogWarning($"Bank UI refresh failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Find BankSlots via reflection to avoid compile-time dependency on BankWindow.
+        /// Searches all MonoBehaviours for a component with a BankSlots field of type ItemIcon[].
+        /// Cached after first successful lookup.
+        /// </summary>
+        /// <summary>
+        /// Find BankSlots via reflection. No caching — the bank component
+        /// may not exist until the player opens the bank window, and
+        /// changes between characters or scenes.
+        /// </summary>
+        /// <summary>
+        /// Read bank items via reflection on GlobalBank.StoredItems + Quantities.
+        /// Returns list of (itemName, quantity) tuples.
+        /// </summary>
+        /// <summary>
+        /// Read bank contents directly from the GBDATA save file on disk.
+        /// This avoids needing the GlobalBank component to be active in the scene.
+        /// Returns list of (itemName, quantity) for all non-empty slots.
+        /// </summary>
+        internal static List<(string name, int qty)> GetBankItemsSnapshot()
+        {
+            try
+            {
+                string gbPath = GetBankPath();
+                if (gbPath == null) return null;
+
+                if (!SafeFileIO.TryReadAllTextWithBackup(gbPath, IsBankJsonValid,
+                    out string json, out _, out string readError))
                 {
-                    var stats = GameData.PlayerStats;
-                    if (stats != null)
-                        GameData.PlayerInv.Gold += recipe.GoldValue;
+                    SkillsPlugin.Log.LogError($"GetBankItems read failed: {readError}");
+                    return null;
                 }
-                catch { }
+
+                var saveData = JsonUtility.FromJson<BankReadData>(json);
+                if (saveData?.BankData == null) return null;
+
+                var result = new List<(string, int)>();
+                for (int i = 0; i < saveData.BankData.Count; i++)
+                {
+                    string itemId = saveData.BankData[i];
+                    if (string.IsNullOrEmpty(itemId)) continue;
+                    // Resolve item ID to item name
+                    string itemName = null;
+                    Item resolvedItem = null;
+
+                    // Check our custom items first (CS_ prefix)
+                    if (itemId.StartsWith("CS_"))
+                    {
+                        resolvedItem = Items.ItemFactory.GetItemById(itemId);
+                        if (resolvedItem != null) itemName = resolvedItem.ItemName;
+                    }
+
+                    // Check game's item database
+                    if (itemName == null)
+                    {
+                        resolvedItem = GameData.ItemDB?.GetItemByID(itemId);
+                        if (resolvedItem != null && resolvedItem != GameData.PlayerInv?.Empty)
+                            itemName = resolvedItem.ItemName;
+                    }
+
+                    if (!string.IsNullOrEmpty(itemName))
+                    {
+                        int qty = resolvedItem.Stackable && i < saveData.BankCount.Count
+                            ? Mathf.Max(1, saveData.BankCount[i]) : 1;
+                        result.Add((itemName, qty));
+                    }
+                }
+                return result;
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogError($"GetBankItems error: {ex.Message}");
+            }
+            return null;
+        }
+
+        /// <summary>Minimal class to deserialize GBDATA JSON.</summary>
+        [System.Serializable]
+        private class BankReadData
+        {
+            public List<string> BankData = new List<string>();
+            public List<int> BankCount = new List<int>();
+            public List<string> TabNames = new List<string>();
+            public int GEc = 0;
+        }
+
+        /// <summary>Give the crafted item to the player via ItemFactory.</summary>
+        internal static bool TryGiveItem(Recipe recipe)
+        {
+            try
+            {
+                return ErenshorSkills.Items.ItemFactory.GiveItemToPlayer(recipe.Name);
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogError($"Crafted item grant failed: {ex.Message}");
+                return false;
             }
         }
 

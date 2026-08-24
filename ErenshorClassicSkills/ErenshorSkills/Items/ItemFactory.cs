@@ -3,6 +3,8 @@ using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Text;
+using System.Text.RegularExpressions;
 using BepInEx;
 using HarmonyLib;
 using UnityEngine;
@@ -49,15 +51,100 @@ namespace ErenshorSkills.Items
         public static Dictionary<string, (string stat, int bonus, float dur, string category)> ConsumableBuffs
             = new Dictionary<string, (string, int, float, string)>(StringComparer.OrdinalIgnoreCase);
 
+        // Original registered item values — used to reset ItemValue if the game inflates it
+        private static Dictionary<string, int> _registeredItemValues
+            = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        // Lightweight one-handed crafted weapons selected for native
+        // PrimaryOrSecondary behavior. Heavy axes, hammers, two-handers,
+        // bows, staves, and shields intentionally remain in their old slots.
+        private static readonly HashSet<string> CraftedOffhandWeaponNames =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "Rusted Heirloom Blade",
+                "Crude Iron Dagger",
+                "Hammered Iron Shortsword",
+                "Goblin-Forged Shiv",
+                "Moonforged Hatchet",
+                "Ghostmetal Rapier",
+                "Emberthorn Scimitar",
+                "Searing Iron Dirk",
+                "Blightfang Dagger",
+                "Eclipse Longsword",
+                "Moonbane Kukri",
+                "Dawnshard Falchion",
+                "Eternity's Edge"
+            };
+
+        // These two nearest-level native models are right-hand-only on the
+        // live player rig. Use similarly themed models that exist beneath both
+        // hand attachment trees so equipping either weapon offhand is visible.
+        private static readonly Dictionary<string, string>
+            CraftedOffhandVisualOverrides =
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "Dawnshard Falchion", "ChargedSword" },
+                    { "Eternity's Edge", "DecidingBlade" }
+                };
+
         // Reference to the game's item database
         private static ItemDatabase _itemDb;
 
         // Path to external icon folder
         private static string IconFolder =>
-            Path.Combine(Paths.PluginPath, "ClassicSkills", "Icons");
+            Path.Combine(RuntimePaths.AssetDirectory, "Icons");
+
+        /// <summary>
+        /// Reset all custom item values to their registered originals.
+        /// Call periodically to prevent any value inflation from game systems.
+        /// </summary>
+        public static void ResetInflatedItemValues()
+        {
+            try
+            {
+                foreach (var kvp in _registeredItemValues)
+                {
+                    Item item;
+                    if (_registeredItems.TryGetValue(kvp.Key, out item) && item != null)
+                    {
+                        if (item.ItemValue != kvp.Value)
+                        {
+                            SkillsPlugin.Log.LogWarning(
+                                $"[ItemFactory] ItemValue inflation detected: {kvp.Key} was {item.ItemValue}, reset to {kvp.Value}");
+                            item.ItemValue = kvp.Value;
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
 
         /// <summary>Whether the factory has been initialized.</summary>
         public static bool Initialized { get; private set; }
+        internal static int LastCatalogValidationErrors { get; private set; }
+        internal static int LastValidatedRecipeCount { get; private set; }
+        internal static bool HotLoadRecoveryComplete { get; private set; } = true;
+
+        // A legacy plugin enabled after the character has already loaded has a
+        // very short interval where Erenshor's unresolved CS_ items are absent
+        // from the runtime inventory.  Never persist that transient view over
+        // the last good sidecar snapshot.
+        private static bool _suppressCustomInventorySaves;
+
+        internal static void SetHotLoadRecoveryPending(bool pending)
+        {
+            _suppressCustomInventorySaves = pending;
+            HotLoadRecoveryComplete = !pending;
+        }
+
+        private sealed class HotLoadRecoveryEntry
+        {
+            internal string ItemId;
+            internal Item Item;
+            internal int SavedQuantity;
+            internal int ExpectedUnits;
+            internal ItemIcon PreferredSlot;
+        }
 
         /// <summary>
         /// Scan the player's inventory and save all custom item names/counts
@@ -66,29 +153,28 @@ namespace ErenshorSkills.Items
         public static void SaveCustomInventory()
         {
             if (!SkillsSaveManager.HasLoaded) return;
+            if (_suppressCustomInventorySaves)
+            {
+                SkillsPlugin.Log.LogWarning(
+                    "SaveCustomInv: skipped while live-enable item recovery is pending.");
+                return;
+            }
             var data = SkillsSaveManager.Data;
-            data.CustomInventory.Clear();
             try
             {
                 var inv = GameData.PlayerInv;
                 if (inv == null) { SkillsPlugin.Log.LogWarning("SaveCustomInv: inv is null"); return; }
 
-                // Count items from StoredSlots (UI slots with quantity)
+                // Count every native location that Erenshor persists.  The
+                // sidecar is also the loader-independent recovery source when
+                // Lunaris is first enabled after character selection, so
+                // equipped/cosmetic/aura/charm items must not be omitted.
                 var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-
-                if (inv.StoredSlots != null)
-                {
-                    foreach (var slot in inv.StoredSlots)
-                    {
-                        if (slot == null || slot.MyItem == null) continue;
-                        string name = slot.MyItem.ItemName;
-                        if (string.IsNullOrEmpty(name)) continue;
-                        if (!_registeredItems.ContainsKey(name)) continue;
-                        int qty = Mathf.Max(1, slot.Quantity);
-                        if (!counts.ContainsKey(name)) counts[name] = 0;
-                        counts[name] += qty;
-                    }
-                }
+                AddCustomSlotCounts(counts, inv.StoredSlots);
+                AddCustomSlotCounts(counts, inv.EquipmentSlots);
+                AddCustomSlotCounts(counts, inv.TransmogSlots);
+                AddCustomSlotCount(counts, inv.AuraSlot);
+                AddCustomSlotCount(counts, inv.CharmSlot);
 
                 // Fallback: also check StoredItems list
                 if (counts.Count == 0 && inv.StoredItems != null)
@@ -102,6 +188,11 @@ namespace ErenshorSkills.Items
                     }
                 }
 
+                // Commit only after a valid inventory scan. During shutdown the
+                // game invokes us again after PlayerInv has been destroyed; the
+                // old code cleared the last good snapshot before noticing that,
+                // then overwrote the sidecar with an empty object.
+                data.CustomInventory.Clear();
                 foreach (var kvp in counts)
                     data.CustomInventory.Add(new SavedCustomItem { Name = kvp.Key, Count = kvp.Value });
 
@@ -113,6 +204,26 @@ namespace ErenshorSkills.Items
             {
                 SkillsPlugin.Log.LogError($"SaveCustomInventory error: {ex.Message}");
             }
+        }
+
+        private static void AddCustomSlotCounts(
+            Dictionary<string, int> counts, IList<ItemIcon> slots)
+        {
+            if (slots == null) return;
+            foreach (ItemIcon slot in slots) AddCustomSlotCount(counts, slot);
+        }
+
+        private static void AddCustomSlotCount(
+            Dictionary<string, int> counts, ItemIcon slot)
+        {
+            if (slot?.MyItem == null || string.IsNullOrEmpty(slot.MyItem.ItemName) ||
+                !_registeredItems.ContainsKey(slot.MyItem.ItemName)) return;
+            // Non-stackable Quantity is item quality (and for bags, the
+            // persistent instance ID), never an item count.
+            int quantity = slot.MyItem.Stackable ? Mathf.Max(1, slot.Quantity) : 1;
+            counts.TryGetValue(slot.MyItem.ItemName, out int current);
+            counts[slot.MyItem.ItemName] = current > int.MaxValue - quantity
+                ? int.MaxValue : current + quantity;
         }
 
         /// <summary>
@@ -141,6 +252,15 @@ namespace ErenshorSkills.Items
         /// </summary>
         public static void Initialize(ItemDatabase itemDb)
         {
+            // Only initialize once — re-running would orphan existing item
+            // instances in the player's inventory, causing white icons,
+            // broken stacking, and item value inflation.
+            if (Initialized)
+            {
+                _itemDb = itemDb; // Update DB reference in case it changed
+                return;
+            }
+
             _itemDb = itemDb;
 
             // Skip initialization if game DB isn't loaded yet (Awake runs before Start)
@@ -151,6 +271,8 @@ namespace ErenshorSkills.Items
             }
 
             _registeredItems.Clear();
+            _registeredItemValues.Clear();
+            _itemsById.Clear();
             _iconCache.Clear();
             _gameIconMap.Clear();
             _gameVisualsBySlot.Clear();
@@ -185,6 +307,656 @@ namespace ErenshorSkills.Items
                 $"({_iconCache.Count} icons loaded" +
                 (extCount > 0 ? $", {extCount} external PNGs" : "") + ")");        }
 
+        /// <summary>
+        /// Restore addon items that the base game could not resolve when a
+        /// Lunaris user enabled this legacy plugin after entering the world.
+        /// GameData.CurrentCharacterSlot still contains the exact saved IDs,
+        /// slots, quantities, equipment, cosmetics, aura, and charm until the
+        /// next native save.  Reconcile by total ID count first so a normal hot
+        /// reload cannot duplicate an item the player already moved.
+        /// </summary>
+        internal static int RecoverMissingItemsAfterHotEnable()
+        {
+            if (!Initialized || GameData.CurrentCharacterSlot == null ||
+                GameData.PlayerInv == null) return 0;
+
+            Inventory inventory = GameData.PlayerInv;
+            SaveGameData save = GameData.CurrentCharacterSlot;
+            var entries = new List<HotLoadRecoveryEntry>();
+
+            AddHotLoadRecoveryEntries(entries, save.CharacterEquip,
+                save.EquipSlotQuantities, inventory.EquipmentSlots);
+            AddHotLoadRecoveryEntries(entries, save.CharacterInv,
+                save.InvSlotQuantities, inventory.StoredSlots);
+            AddHotLoadRecoveryEntries(entries, save.CharacterCosmetics,
+                save.CosmeticSlotQuantities, inventory.TransmogSlots);
+            AddHotLoadRecoveryEntry(entries, save.AuraItem, 1,
+                inventory.AuraSlot);
+            AddHotLoadRecoveryEntry(entries, save.CharmItem,
+                save.CharmQual, inventory.CharmSlot);
+
+            if (entries.Count == 0)
+            {
+                SaveGameData backup = FindLatestAddonItemBackup(save);
+                if (backup != null)
+                {
+                    AddHotLoadRecoveryEntries(entries, backup.CharacterEquip,
+                        backup.EquipSlotQuantities, inventory.EquipmentSlots);
+                    AddHotLoadRecoveryEntries(entries, backup.CharacterInv,
+                        backup.InvSlotQuantities, inventory.StoredSlots);
+                    AddHotLoadRecoveryEntries(entries, backup.CharacterCosmetics,
+                        backup.CosmeticSlotQuantities, inventory.TransmogSlots);
+                    AddHotLoadRecoveryEntry(entries, backup.AuraItem, 1,
+                        inventory.AuraSlot);
+                    AddHotLoadRecoveryEntry(entries, backup.CharmItem,
+                        backup.CharmQual, inventory.CharmSlot);
+                    ReconcileBackupEntriesWithSidecar(entries, inventory);
+                }
+                else
+                {
+                    AddSidecarRecoveryEntries(entries, inventory);
+                }
+                if (entries.Count == 0)
+                {
+                    SetHotLoadRecoveryPending(false);
+                    return 0;
+                }
+            }
+
+            var expected = new Dictionary<string, long>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (HotLoadRecoveryEntry entry in entries)
+            {
+                expected.TryGetValue(entry.ItemId, out long count);
+                expected[entry.ItemId] = count + entry.ExpectedUnits;
+            }
+
+            var current = new Dictionary<string, long>(
+                StringComparer.OrdinalIgnoreCase);
+            CountCurrentCustomItems(current, inventory.EquipmentSlots, inventory);
+            CountCurrentCustomItems(current, inventory.StoredSlots, inventory);
+            CountCurrentCustomItems(current, inventory.TransmogSlots, inventory);
+            CountCurrentCustomItem(current, inventory.AuraSlot, inventory);
+            CountCurrentCustomItem(current, inventory.CharmSlot, inventory);
+
+            var deficit = new Dictionary<string, long>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var pair in expected)
+            {
+                current.TryGetValue(pair.Key, out long present);
+                if (pair.Value > present) deficit[pair.Key] = pair.Value - present;
+            }
+            if (deficit.Count == 0)
+            {
+                SetHotLoadRecoveryPending(false);
+                return 0;
+            }
+
+            int restoredSlots = 0;
+            long restoredUnits = 0;
+            var unresolved = new List<HotLoadRecoveryEntry>();
+            foreach (HotLoadRecoveryEntry entry in entries)
+            {
+                if (!deficit.TryGetValue(entry.ItemId, out long missing) ||
+                    missing <= 0) continue;
+                if (IsEmptyRecoverySlot(entry.PreferredSlot, inventory))
+                {
+                    RestoreHotLoadEntry(entry, entry.PreferredSlot, missing,
+                        deficit, ref restoredSlots, ref restoredUnits);
+                }
+                else
+                {
+                    unresolved.Add(entry);
+                }
+            }
+
+            // Never overwrite an item the player acquired or equipped while
+            // the plugin was disabled.  If its original saved slot is occupied,
+            // return the missing addon item to an empty inventory slot instead.
+            foreach (HotLoadRecoveryEntry entry in unresolved)
+            {
+                if (!deficit.TryGetValue(entry.ItemId, out long missing) ||
+                    missing <= 0) continue;
+                ItemIcon fallback = FindEmptyStoredSlot(inventory);
+                if (fallback == null) break;
+                RestoreHotLoadEntry(entry, fallback, missing, deficit,
+                    ref restoredSlots, ref restoredUnits);
+            }
+
+            if (restoredSlots > 0)
+            {
+                inventory.UpdatePlayerInventory();
+                BagSystem.ReconcileInventoryBagIds();
+                SkillsPlugin.Log.LogWarning(
+                    $"Recovered {restoredUnits} addon item unit(s) in " +
+                    $"{restoredSlots} slot(s) after a live Lunaris enable.");
+                ChatHelper.Send(
+                    $"<color=#4CAF50>[Classic Skills]</color> Restored " +
+                    $"{restoredUnits} saved addon item(s) after live enable.");
+            }
+
+            long remaining = 0;
+            foreach (long value in deficit.Values)
+                if (value > 0) remaining += value;
+            if (remaining > 0)
+            {
+                SkillsPlugin.Log.LogError(
+                    $"Could not restore {remaining} addon item unit(s) after " +
+                    "live enable because no safe inventory slot was available.");
+                ChatHelper.Send(
+                    "<color=#EF5350>[Classic Skills]</color> Some saved addon " +
+                    "items need an empty inventory slot. Free space, then relog " +
+                    "before saving.");
+            }
+            else
+            {
+                SetHotLoadRecoveryPending(false);
+            }
+            return restoredSlots;
+        }
+
+        /// <summary>
+        /// Erenshor auto-saves shortly after entering the world.  When a
+        /// Lunaris legacy plugin was disabled during character selection that
+        /// save can already have replaced unresolved CS_ IDs before Start().
+        /// The rotating native backups retain exact slots, equipment positions,
+        /// qualities, and bag instance IDs.  Read only the newest matching
+        /// backup that still contains an addon ID.
+        /// </summary>
+        private static SaveGameData FindLatestAddonItemBackup(SaveGameData current)
+        {
+            try
+            {
+                string character = GameData.PlayerStats?.MyName;
+                int index = current != null ? current.index :
+                    PlayerPrefs.GetInt("PrefSlot", -1);
+                if (string.IsNullOrWhiteSpace(character) || index < 0) return null;
+                string backupDirectory = Path.Combine(
+                    Application.persistentDataPath, "backups");
+                if (!Directory.Exists(backupDirectory)) return null;
+                string prefix = character + index + "-";
+                foreach (string path in Directory.GetFiles(backupDirectory)
+                    .Where(candidate => Path.GetFileName(candidate).StartsWith(
+                        prefix, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(File.GetLastWriteTimeUtc))
+                {
+                    string json = File.ReadAllText(path);
+                    if (string.IsNullOrWhiteSpace(json) ||
+                        json.IndexOf("CS_", StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
+                    SaveGameData candidate = JsonUtility.FromJson<SaveGameData>(json);
+                    if (candidate == null || candidate.index != index ||
+                        !string.Equals(candidate.CharName, character,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+                    var probe = new List<HotLoadRecoveryEntry>();
+                    AddHotLoadRecoveryEntries(probe, candidate.CharacterEquip,
+                        candidate.EquipSlotQuantities, null);
+                    AddHotLoadRecoveryEntries(probe, candidate.CharacterInv,
+                        candidate.InvSlotQuantities, null);
+                    AddHotLoadRecoveryEntries(probe, candidate.CharacterCosmetics,
+                        candidate.CosmeticSlotQuantities, null);
+                    AddHotLoadRecoveryEntry(probe, candidate.AuraItem, 1, null);
+                    AddHotLoadRecoveryEntry(probe, candidate.CharmItem,
+                        candidate.CharmQual, null);
+                    if (probe.Count == 0) continue;
+                    SkillsPlugin.Log.LogWarning(
+                        $"Live-enable recovery is using native backup " +
+                        $"'{Path.GetFileName(path)}' for exact addon item positions.");
+                    return candidate;
+                }
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning(
+                    $"Could not inspect native item backups: {ex.Message}");
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// The sidecar is the authoritative aggregate for stored addon items.
+        /// It prevents an older rotating backup from resurrecting consumed
+        /// materials while still allowing legacy sidecars (which did not count
+        /// equipped locations) to recover equipped/cosmetic addon gear.
+        /// </summary>
+        private static void ReconcileBackupEntriesWithSidecar(
+            List<HotLoadRecoveryEntry> entries, Inventory inventory)
+        {
+            var limits = GetSidecarRecoveryLimits();
+            var accepted = new List<HotLoadRecoveryEntry>();
+            var used = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            int sidecarFormat = SkillsSaveManager.LoadedInventoryFormatVersion;
+            foreach (HotLoadRecoveryEntry entry in entries)
+            {
+                bool stored = entry.PreferredSlot != null &&
+                    inventory?.StoredSlots != null &&
+                    inventory.StoredSlots.Contains(entry.PreferredSlot);
+                string name = entry.Item.ItemName;
+                if (sidecarFormat == 0)
+                {
+                    // No sidecar exists, so the newest validated native backup
+                    // is the only recovery authority available.
+                    accepted.Add(entry);
+                    continue;
+                }
+                if (sidecarFormat == 1 && !stored)
+                {
+                    // Legacy sidecars counted StoredSlots only. Preserve exact
+                    // equipment/cosmetic/aura/charm entries independently of
+                    // the aggregate StoredSlots limit.
+                    accepted.Add(entry);
+                    continue;
+                }
+                if (!limits.TryGetValue(name, out int limit))
+                {
+                    continue;
+                }
+                used.TryGetValue(name, out int current);
+                int remaining = limit - current;
+                if (remaining <= 0) continue;
+                if (entry.Item.Stackable && entry.ExpectedUnits > remaining)
+                {
+                    entry.SavedQuantity = remaining;
+                    entry.ExpectedUnits = remaining;
+                }
+                accepted.Add(entry);
+                used[name] = current + entry.ExpectedUnits;
+            }
+            entries.Clear();
+            entries.AddRange(accepted);
+            AddSidecarRecoveryEntries(entries, inventory, used);
+        }
+
+        private static Dictionary<string, int> GetSidecarRecoveryLimits()
+        {
+            var limits = new Dictionary<string, int>(
+                StringComparer.OrdinalIgnoreCase);
+            var saved = SkillsSaveManager.Data?.CustomInventory;
+            if (saved == null) return limits;
+            foreach (SavedCustomItem record in saved)
+            {
+                if (record == null || string.IsNullOrWhiteSpace(record.Name) ||
+                    record.Count <= 0) continue;
+                limits[record.Name] = record.Count;
+            }
+            return limits;
+        }
+
+        private static void AddSidecarRecoveryEntries(
+            List<HotLoadRecoveryEntry> entries, Inventory inventory,
+            Dictionary<string, int> alreadyExpected = null)
+        {
+            var limits = GetSidecarRecoveryLimits();
+            foreach (var pair in limits)
+            {
+                Item item = ResolveItem(pair.Key);
+                if (item == null || string.IsNullOrEmpty(item.Id) ||
+                    GetItemById(item.Id) == null) continue;
+                int used = 0;
+                alreadyExpected?.TryGetValue(pair.Key, out used);
+                int remaining = pair.Value - used;
+                if (remaining <= 0) continue;
+                if (item.Stackable)
+                {
+                    entries.Add(new HotLoadRecoveryEntry
+                    {
+                        ItemId = item.Id,
+                        Item = item,
+                        SavedQuantity = remaining,
+                        ExpectedUnits = remaining,
+                        PreferredSlot = null
+                    });
+                }
+                else
+                {
+                    int safeCount = Mathf.Min(remaining,
+                        inventory?.StoredSlots?.Count ?? 0);
+                    for (int i = 0; i < safeCount; i++)
+                    {
+                        entries.Add(new HotLoadRecoveryEntry
+                        {
+                            ItemId = item.Id,
+                            Item = item,
+                            SavedQuantity = 1,
+                            ExpectedUnits = 1,
+                            PreferredSlot = null
+                        });
+                    }
+                }
+            }
+            if (entries.Count > 0)
+                SkillsPlugin.Log.LogWarning(
+                    "Live-enable recovery reconciled addon counts with the " +
+                    "last validated Classic Skills inventory sidecar.");
+        }
+
+        private static void AddHotLoadRecoveryEntries(
+            List<HotLoadRecoveryEntry> entries, IList<string> ids,
+            IList<int> quantities, IList<ItemIcon> slots)
+        {
+            if (ids == null) return;
+            for (int i = 0; i < ids.Count; i++)
+            {
+                int quantity = quantities != null && i < quantities.Count
+                    ? quantities[i] : 1;
+                ItemIcon slot = slots != null && i < slots.Count ? slots[i] : null;
+                AddHotLoadRecoveryEntry(entries, ids[i], quantity, slot);
+            }
+        }
+
+        private static void AddHotLoadRecoveryEntry(
+            List<HotLoadRecoveryEntry> entries, string itemId, int quantity,
+            ItemIcon slot)
+        {
+            if (string.IsNullOrEmpty(itemId)) return;
+            Item item = GetItemById(itemId);
+            if (item == null) return;
+            int savedQuantity = Mathf.Max(1, quantity);
+            entries.Add(new HotLoadRecoveryEntry
+            {
+                ItemId = itemId,
+                Item = item,
+                SavedQuantity = savedQuantity,
+                ExpectedUnits = item.Stackable ? savedQuantity : 1,
+                PreferredSlot = slot
+            });
+        }
+
+        private static void CountCurrentCustomItems(
+            Dictionary<string, long> counts, IList<ItemIcon> slots,
+            Inventory inventory)
+        {
+            if (slots == null) return;
+            foreach (ItemIcon slot in slots)
+                CountCurrentCustomItem(counts, slot, inventory);
+        }
+
+        private static void CountCurrentCustomItem(
+            Dictionary<string, long> counts, ItemIcon slot, Inventory inventory)
+        {
+            Item item = slot?.MyItem;
+            if (item == null || item == inventory.Empty ||
+                string.IsNullOrEmpty(item.Id) || GetItemById(item.Id) == null) return;
+            long units = item.Stackable ? Mathf.Max(1, slot.Quantity) : 1;
+            counts.TryGetValue(item.Id, out long count);
+            counts[item.Id] = count + units;
+        }
+
+        private static bool IsEmptyRecoverySlot(ItemIcon slot, Inventory inventory)
+        {
+            return slot != null && (slot.MyItem == null || slot.MyItem == inventory.Empty);
+        }
+
+        private static ItemIcon FindEmptyStoredSlot(Inventory inventory)
+        {
+            if (inventory?.StoredSlots == null) return null;
+            foreach (ItemIcon slot in inventory.StoredSlots)
+                if (BagSystem.IsDirectInventorySlot(slot) &&
+                    IsEmptyRecoverySlot(slot, inventory)) return slot;
+            return null;
+        }
+
+        private static void RestoreHotLoadEntry(HotLoadRecoveryEntry entry,
+            ItemIcon target, long missing,
+            Dictionary<string, long> deficit, ref int restoredSlots,
+            ref long restoredUnits)
+        {
+            long units = entry.Item.Stackable
+                ? Math.Min(entry.ExpectedUnits, missing) : 1;
+            if (units <= 0 || units > int.MaxValue) return;
+            target.MyItem = entry.Item;
+            target.Quantity = entry.Item.Stackable
+                ? (int)units : entry.SavedQuantity;
+            target.UpdateSlotImage();
+            deficit[entry.ItemId] = missing - units;
+            restoredSlots++;
+            restoredUnits += units;
+        }
+
+        internal static void ValidateTradeskillItems()
+        {
+            int recipes = 0, errors = 0;
+            string[] tradeskills =
+                { "Smithing", "Baking", "Brewing", "Fletching", "Jewelcraft", "Tailoring" };
+            var recipeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (string tradeskill in tradeskills)
+            {
+                foreach (var recipe in Skills.Tradeskills.GetRecipesForSkillPublic(tradeskill))
+                {
+                    recipes++;
+                    if (recipe == null || string.IsNullOrWhiteSpace(recipe.Name) ||
+                        !recipeNames.Add(recipe.Name))
+                    {
+                        errors++;
+                        SkillsPlugin.Log.LogError(
+                            $"Recipe validation: null, unnamed, or duplicate recipe in {tradeskill}.");
+                        continue;
+                    }
+                    if (!string.Equals(recipe.Tradeskill, tradeskill,
+                        StringComparison.Ordinal) || recipe.MinSkillLevel < 1 ||
+                        recipe.MinSkillLevel > 180 ||
+                        recipe.TrivialLevel < recipe.MinSkillLevel ||
+                        recipe.TrivialLevel > 180 || recipe.GoldValue < 0 ||
+                        recipe.XpOnSuccess < 0f || recipe.XpOnFailure < 0f)
+                    {
+                        errors++;
+                        SkillsPlugin.Log.LogError(
+                            $"Recipe validation: '{recipe.Name}' has invalid skill, level, value, or XP metadata.");
+                    }
+                    bool materialShapeValid = recipe.Materials != null &&
+                        recipe.MaterialCounts != null && recipe.Materials.Length > 0 &&
+                        recipe.Materials.Length == recipe.MaterialCounts.Length;
+                    if (!materialShapeValid)
+                    {
+                        errors++;
+                        SkillsPlugin.Log.LogError(
+                            $"Recipe validation: '{recipe.Name}' has malformed material arrays.");
+                    }
+
+                    if (!_registeredItems.TryGetValue(recipe.Name, out var item) || item == null)
+                    {
+                        errors++;
+                        SkillsPlugin.Log.LogError($"Item validation: missing recipe output '{recipe.Name}'");
+                        continue;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(item.Id) || item.ItemValue < 0)
+                    {
+                        errors++;
+                        SkillsPlugin.Log.LogError(
+                            $"Item validation: output '{recipe.Name}' has an invalid ID or value.");
+                    }
+
+                    if (item.ThisWeaponType != Item.WeaponType.None &&
+                        (item.WeaponDmg <= 0 || item.WeaponDly <= 0f))
+                    {
+                        errors++;
+                        SkillsPlugin.Log.LogError($"Item validation: weapon '{recipe.Name}' has invalid damage/delay");
+                    }
+
+                    if ((tradeskill == "Baking" || tradeskill == "Brewing") &&
+                        item.ItemEffectOnClick == null)
+                    {
+                        errors++;
+                        SkillsPlugin.Log.LogError($"Item validation: consumable '{recipe.Name}' has no effect");
+                    }
+
+                    ValidateAdvertisedRecipeStats(recipe, item,
+                        tradeskill == "Baking" || tradeskill == "Brewing",
+                        ref errors);
+
+                    if (materialShapeValid)
+                    {
+                        for (int i = 0; i < recipe.Materials.Length; i++)
+                        {
+                            string material = recipe.Materials[i];
+                            if (string.IsNullOrWhiteSpace(material) ||
+                                recipe.MaterialCounts[i] <= 0 || ResolveItem(material) == null)
+                            {
+                                errors++;
+                                SkillsPlugin.Log.LogError(
+                                    $"Recipe validation: '{recipe.Name}' has invalid or unresolved material '{material}'.");
+                            }
+                        }
+                    }
+                }
+            }
+
+            var itemIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pair in _registeredItems)
+            {
+                Item item = pair.Value;
+                if (item == null || string.IsNullOrWhiteSpace(item.ItemName) ||
+                    !string.Equals(pair.Key, item.ItemName, StringComparison.Ordinal))
+                {
+                    errors++;
+                    SkillsPlugin.Log.LogError(
+                        $"Item validation: registry entry '{pair.Key}' is null or mismatched.");
+                    continue;
+                }
+                if (string.IsNullOrWhiteSpace(item.Id))
+                {
+                    errors++;
+                    SkillsPlugin.Log.LogError(
+                        $"Item validation: '{item.ItemName}' has no persistent ID.");
+                }
+                else if (itemIds.TryGetValue(item.Id, out string existing))
+                {
+                    errors++;
+                    SkillsPlugin.Log.LogError(
+                        $"Item validation: duplicate ID '{item.Id}' on '{existing}' and '{item.ItemName}'.");
+                }
+                else itemIds[item.Id] = item.ItemName;
+            }
+
+            if (recipes != 286)
+            {
+                errors++;
+                SkillsPlugin.Log.LogError(
+                    $"Recipe validation: release catalog expected 286 recipes but found {recipes}.");
+            }
+
+            LastCatalogValidationErrors = errors;
+            LastValidatedRecipeCount = recipes;
+
+            if (errors == 0)
+                SkillsPlugin.Log.LogInfo(
+                    $"Item validation: all {_registeredItems.Count} items and {recipes} recipes passed.");
+            else
+                SkillsPlugin.Log.LogError(
+                    $"Item validation: {errors} catalog errors across {_registeredItems.Count} items and {recipes} recipes.");
+        }
+
+        private static void ValidateAdvertisedRecipeStats(
+            Skills.Tradeskills.Recipe recipe, Item item, bool consumable,
+            ref int errors)
+        {
+            string description = recipe?.ResultDescription;
+            if (item == null || string.IsNullOrWhiteSpace(description)) return;
+            string lower = description.ToLowerInvariant();
+            Spell effect = consumable ? item.ItemEffectOnClick : item.WornEffect;
+
+            int allStats = ParseDescriptionNumber(lower,
+                @"\+(\d+)\s*all\s*stats");
+            if (lower.Contains("+"))
+            {
+                ValidateContractField(recipe.Name, "Strength",
+                    Math.Max(allStats, ParseDescriptionNumber(lower,
+                        @"\+(\d+)\s*str(?:ength)?\b")),
+                    consumable ? effect?.Str ?? 0 : item.Str, ref errors);
+                ValidateContractField(recipe.Name, "Endurance",
+                    Math.Max(allStats, ParseDescriptionNumber(lower,
+                        @"\+(\d+)\s*end(?:urance)?\b")),
+                    consumable ? effect?.End ?? 0 : item.End, ref errors);
+                ValidateContractField(recipe.Name, "Dexterity",
+                    Math.Max(allStats, ParseDescriptionNumber(lower,
+                        @"\+(\d+)\s*dex(?:terity)?\b")),
+                    consumable ? effect?.Dex ?? 0 : item.Dex, ref errors);
+                ValidateContractField(recipe.Name, "Agility",
+                    Math.Max(allStats, ParseDescriptionNumber(lower,
+                        @"\+(\d+)\s*agi(?:lity)?\b")),
+                    consumable ? effect?.Agi ?? 0 : item.Agi, ref errors);
+                ValidateContractField(recipe.Name, "Intelligence",
+                    Math.Max(allStats, ParseDescriptionNumber(lower,
+                        @"\+(\d+)\s*int(?:elligence)?\b")),
+                    consumable ? effect?.Int ?? 0 : item.Int, ref errors);
+                ValidateContractField(recipe.Name, "Wisdom",
+                    Math.Max(allStats, ParseDescriptionNumber(lower,
+                        @"\+(\d+)\s*wis(?:dom)?\b")),
+                    consumable ? effect?.Wis ?? 0 : item.Wis, ref errors);
+                ValidateContractField(recipe.Name, "Charisma",
+                    Math.Max(allStats, ParseDescriptionNumber(lower,
+                        @"\+(\d+)\s*cha(?:risma)?\b")),
+                    consumable ? effect?.Cha ?? 0 : item.Cha, ref errors);
+
+                int allResists = ParseDescriptionNumber(lower,
+                    @"\+(\d+)\s*all\s*resist");
+                ValidateContractField(recipe.Name, "Magic resist",
+                    Math.Max(allResists, ParseDescriptionNumber(lower,
+                        @"\+(\d+)\s*magic\s*resist")),
+                    consumable ? effect?.MR ?? 0 : item.MR, ref errors);
+                ValidateContractField(recipe.Name, "Elemental resist",
+                    Math.Max(allResists, ParseDescriptionNumber(lower,
+                        @"\+(\d+)\s*(?:fire/cold|fire|cold|elemental)\s*resist")),
+                    consumable ? effect?.ER ?? 0 : item.ER, ref errors);
+                ValidateContractField(recipe.Name, "Poison resist",
+                    Math.Max(allResists, ParseDescriptionNumber(lower,
+                        @"\+(\d+)\s*poison\s*resist")),
+                    consumable ? effect?.PR ?? 0 : item.PR, ref errors);
+                ValidateContractField(recipe.Name, "Void resist",
+                    Math.Max(allResists, ParseDescriptionNumber(lower,
+                        @"\+(\d+)\s*void\s*resist")),
+                    consumable ? effect?.VR ?? 0 : item.VR, ref errors);
+            }
+
+            int haste = ParseDescriptionNumber(lower,
+                @"\+(\d+)\s*%?\s*haste");
+            if (haste > 0)
+                ValidateContractField(recipe.Name, "Haste", haste,
+                    effect == null ? 0 : Mathf.RoundToInt(effect.Haste), ref errors);
+
+            int manaRegen = ParseDescriptionNumber(lower,
+                @"\+(\d+)\s*(?:hp\s*/\s*)?(?:mp|mana)\s*regen");
+            if (manaRegen > 0)
+                ValidateContractField(recipe.Name, "Mana regen", manaRegen,
+                    effect?.Mana ?? 0, ref errors);
+
+            int healthRegen = ParseDescriptionNumber(lower,
+                @"\+(\d+)\s*hp(?:\s*/\s*(?:mp|mana))?\s*regen");
+            if (healthRegen == 0 && !consumable && lower.Contains("hp regen"))
+                healthRegen = 1;
+            if (healthRegen > 0)
+                ValidateContractField(recipe.Name, "HP regen", healthRegen,
+                    effect?.TargetHealing ?? 0, ref errors);
+
+            if (!consumable)
+            {
+                int armor = ParseDescriptionNumber(lower, @"\+(\d+)\s*ac\b");
+                if (armor > 0)
+                    ValidateContractField(recipe.Name, "Armor", armor,
+                        item.AC, ref errors);
+            }
+            else
+            {
+                int minutes = ParseDescriptionNumber(lower, @"(\d+)\s*min");
+                if (minutes > 0)
+                    ValidateContractField(recipe.Name, "Duration ticks",
+                        minutes * 20, effect?.SpellDurationInTicks ?? 0,
+                        ref errors);
+            }
+        }
+
+        private static void ValidateContractField(string itemName,
+            string field, int expected, int actual, ref int errors)
+        {
+            if (expected == actual) return;
+            errors++;
+            SkillsPlugin.Log.LogError(
+                $"Item validation: '{itemName}' advertises {field} {expected}, " +
+                $"but the runtime item provides {actual}.");
+        }
+
         // ═════════════════════════════════════════════════════════════
         // Public API — used by Foraging, Tradeskills, Begging
         // ═════════════════════════════════════════════════════════════
@@ -194,8 +966,305 @@ namespace ErenshorSkills.Items
         /// </summary>
         public static Item GetItem(string name)
         {
+            if (string.IsNullOrWhiteSpace(name)) return null;
             _registeredItems.TryGetValue(name, out var item);
             return item;
+        }
+
+        /// <summary>
+        /// Stable snapshots used by the opt-in in-game smoke tester. Callers
+        /// cannot mutate the registries themselves.
+        /// </summary>
+        internal static List<Item> GetRegisteredItemsForTesting()
+        {
+            var items = new List<Item>();
+            foreach (var pair in _registeredItems)
+                if (pair.Value != null) items.Add(pair.Value);
+            items.Sort((left, right) => string.Compare(left?.ItemName,
+                right?.ItemName, StringComparison.OrdinalIgnoreCase));
+            return items;
+        }
+
+        internal static List<Item> GetNativeItemsForTesting()
+        {
+            var items = new List<Item>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var database = _itemDb?.ItemDB;
+            if (database != null)
+            {
+                foreach (var item in database)
+                {
+                    if (item == null || string.IsNullOrWhiteSpace(item.ItemName) ||
+                        !seen.Add(item.ItemName)) continue;
+                    items.Add(item);
+                }
+            }
+            items.Sort((left, right) => string.Compare(left?.ItemName,
+                right?.ItemName, StringComparison.OrdinalIgnoreCase));
+            return items;
+        }
+
+        internal static List<Item> GetCraftedOffhandWeaponsForTesting()
+        {
+            return CraftedOffhandWeaponNames.Select(GetItem)
+                .Where(item => item != null)
+                .OrderBy(item => item.ItemLevel)
+                .ThenBy(item => item.ItemName,
+                    StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        internal static bool IsCraftedOffhandWeapon(Item item)
+        {
+            return item != null &&
+                CraftedOffhandWeaponNames.Contains(item.ItemName);
+        }
+
+        internal static bool RunCraftedOffhandSelfTest(out string detail)
+        {
+            var errors = new List<string>();
+            List<Item> weapons = GetCraftedOffhandWeaponsForTesting();
+            ModularParts modulars = GameData.PlayerInv?.Modulars;
+            if (weapons.Count != CraftedOffhandWeaponNames.Count)
+                errors.Add($"resolved {weapons.Count}/" +
+                    CraftedOffhandWeaponNames.Count + " curated weapons");
+            foreach (Item item in weapons)
+            {
+                bool oneHand = item.ThisWeaponType ==
+                        Item.WeaponType.OneHandMelee ||
+                    item.ThisWeaponType == Item.WeaponType.OneHandDagger;
+                if (!oneHand) errors.Add(item.ItemName + " is not one-handed");
+                if (item.RequiredSlot != Item.SlotType.PrimaryOrSecondary)
+                    errors.Add(item.ItemName + " is not PrimaryOrSecondary");
+                if (item.Shield) errors.Add(item.ItemName + " became a shield");
+                if (item.Stackable)
+                    errors.Add(item.ItemName + " became stackable");
+                if (string.IsNullOrWhiteSpace(item.EquipmentToActivate))
+                    errors.Add(item.ItemName + " lacks a hand model");
+                else if (modulars == null)
+                    errors.Add("live modular player rig is unavailable");
+                else
+                {
+                    bool right = HasNamedVisual(modulars.WeaponR,
+                        item.EquipmentToActivate);
+                    bool left = HasNamedVisual(modulars.WeaponL,
+                        item.EquipmentToActivate);
+                    if (!right || !left)
+                        errors.Add(item.ItemName + " model " +
+                            item.EquipmentToActivate + " is not present in " +
+                            $"both hands (right={right}, left={left})");
+                }
+            }
+            bool heavyStayedPrimary = GetRegisteredItemsForTesting()
+                .Where(item => item != null &&
+                    (item.ThisWeaponType == Item.WeaponType.TwoHandMelee ||
+                     item.ThisWeaponType == Item.WeaponType.TwoHandStaff ||
+                     item.ThisWeaponType == Item.WeaponType.TwoHandBow))
+                .All(item => item.RequiredSlot !=
+                    Item.SlotType.PrimaryOrSecondary);
+            if (!heavyStayedPrimary)
+                errors.Add("a crafted two-handed weapon became offhand eligible");
+            detail = errors.Count == 0
+                ? $"{weapons.Count} curated one-handed weapons span levels " +
+                  $"{weapons.Min(item => item.ItemLevel)}-" +
+                  $"{weapons.Max(item => item.ItemLevel)}; all use native " +
+                  "PrimaryOrSecondary handling, models exist in both hand " +
+                  "trees, and every two-hander stayed primary-only"
+                : string.Join("; ", errors);
+            return errors.Count == 0;
+        }
+
+        private static bool HasNamedVisual(Transform root, string name)
+        {
+            if (root == null || string.IsNullOrWhiteSpace(name)) return false;
+            foreach (Transform candidate in
+                root.GetComponentsInChildren<Transform>(true))
+                if (string.Equals(candidate.name, name,
+                    StringComparison.Ordinal)) return true;
+            return false;
+        }
+
+        internal static bool RunCraftedIconSelfTest(out string detail)
+        {
+            const int expectedIconCount = 280;
+            var errors = new List<string>();
+            var fingerprints = new HashSet<ulong>();
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int checkedIcons = 0;
+
+            foreach (string tradeskill in new[]
+            {
+                "Smithing", "Baking", "Brewing",
+                "Fletching", "Jewelcraft", "Tailoring"
+            })
+            {
+                foreach (Skills.Tradeskills.Recipe recipe in
+                    Skills.Tradeskills.GetRecipesForSkillPublic(tradeskill))
+                {
+                    if (recipe == null || string.IsNullOrWhiteSpace(recipe.Name) ||
+                        !names.Add(recipe?.Name ?? ""))
+                    {
+                        errors.Add("null, unnamed, or duplicate recipe");
+                        continue;
+                    }
+
+                    Item item = GetItem(recipe.Name);
+                    Sprite sprite = item?.ItemIcon;
+                    Texture2D texture = sprite?.texture;
+                    if (item == null || sprite == null || texture == null)
+                    {
+                        errors.Add(recipe.Name + " has no runtime icon");
+                        continue;
+                    }
+
+                    checkedIcons++;
+                    if (texture.width != 64 || texture.height != 64 ||
+                        Mathf.RoundToInt(sprite.rect.width) != 64 ||
+                        Mathf.RoundToInt(sprite.rect.height) != 64)
+                    {
+                        errors.Add(recipe.Name + " is not a 64x64 sprite");
+                        continue;
+                    }
+
+                    try
+                    {
+                        Color32[] pixels = texture.GetPixels32();
+                        int visible = 0;
+                        int transparent = 0;
+                        int greenSpill = 0;
+                        ulong fingerprint = 1469598103934665603UL;
+                        foreach (Color32 pixel in pixels)
+                        {
+                            if (pixel.a == 0) transparent++; else visible++;
+                            if (pixel.a > 0 && pixel.g > 190 &&
+                                pixel.g * 100 > pixel.r * 155 &&
+                                pixel.g * 100 > pixel.b * 155)
+                                greenSpill++;
+                            fingerprint ^= pixel.r;
+                            fingerprint *= 1099511628211UL;
+                            fingerprint ^= pixel.g;
+                            fingerprint *= 1099511628211UL;
+                            fingerprint ^= pixel.b;
+                            fingerprint *= 1099511628211UL;
+                            fingerprint ^= pixel.a;
+                            fingerprint *= 1099511628211UL;
+                        }
+
+                        int last = pixels.Length - 1;
+                        bool clearCorners = pixels[0].a == 0 &&
+                            pixels[texture.width - 1].a == 0 &&
+                            pixels[last - texture.width + 1].a == 0 &&
+                            pixels[last].a == 0;
+                        if (visible == 0 || transparent == 0)
+                            errors.Add(recipe.Name + " lacks a real alpha silhouette");
+                        if (!clearCorners)
+                            errors.Add(recipe.Name + " has an opaque corner");
+                        if (greenSpill != 0)
+                            errors.Add(recipe.Name + " has chroma-key spill");
+                        if (!fingerprints.Add(fingerprint))
+                            errors.Add(recipe.Name + " duplicates another crafted icon");
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add(recipe.Name + " icon is unreadable: " + ex.Message);
+                    }
+                }
+            }
+
+            if (checkedIcons != expectedIconCount)
+                errors.Add($"resolved {checkedIcons}/{expectedIconCount} icons");
+            if (fingerprints.Count != expectedIconCount)
+                errors.Add($"found {fingerprints.Count}/{expectedIconCount} unique pixel fingerprints");
+
+            detail = errors.Count == 0
+                ? $"{checkedIcons} recipe outputs use unique readable 64x64 RGBA sprites with transparent corners and zero chroma spill"
+                : string.Join("; ", errors.Take(12)) +
+                  (errors.Count > 12 ? $"; ... ({errors.Count} errors)" : "");
+            return errors.Count == 0;
+        }
+
+        /// <summary>
+        /// True when a spell object is the click effect of an actual item.
+        /// Reference identity is intentional: spell names and spell lines are
+        /// shared by unrelated abilities in Erenshor, while ItemEffectOnClick
+        /// points at the exact ScriptableObject used by the consumable.
+        /// </summary>
+        public static bool IsConsumableSpell(Spell spell)
+        {
+            if (spell == null) return false;
+            if (!string.IsNullOrEmpty(spell.SpellName) &&
+                (spell.SpellName.EndsWith("[CS_Food]",
+                     StringComparison.OrdinalIgnoreCase) ||
+                 spell.SpellName.EndsWith("[CS_Drink]",
+                     StringComparison.OrdinalIgnoreCase)))
+                return true;
+            foreach (var pair in ConsumableBuffs)
+            {
+                Item item = GetItem(pair.Key);
+                if (item != null && ReferenceEquals(
+                        item.ItemEffectOnClick, spell))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Register an externally-created item (e.g. recipe scrolls) so the
+        /// save/restore system recognizes it as a custom item.
+        /// </summary>
+        public static void RegisterExternalItem(string name, Item item)
+        {
+            if (item == null || string.IsNullOrEmpty(name)) return;
+            _registeredItems[name] = item;
+            _registeredItemValues[name] = item.ItemValue;
+            if (!string.IsNullOrWhiteSpace(item.Id))
+                _itemsById[item.Id] = item;
+        }
+
+        /// <summary>True only for an item instance registered by this addon.</summary>
+        public static bool IsCustomItem(Item item)
+        {
+            if (item == null || string.IsNullOrEmpty(item.ItemName)) return false;
+            return _registeredItems.TryGetValue(item.ItemName, out var registered) &&
+                ReferenceEquals(registered, item);
+        }
+
+        /// <summary>
+        /// Resolve an Item object by name. Checks custom items first, then
+        /// the game's native database. Returns null if not found.
+        /// </summary>
+        public static Item ResolveItem(string itemName)
+        {
+            try
+            {
+                var item = GetItem(itemName);
+                if (item == null && _itemDb != null)
+                {
+                    foreach (var gameItem in _itemDb.ItemDB)
+                    {
+                        if (gameItem != null && string.Equals(gameItem.ItemName,
+                            itemName, StringComparison.OrdinalIgnoreCase))
+                            return gameItem;
+                    }
+                }
+                return item;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Test-only name resolution also materializes the deterministic,
+        /// player-level variant of rare forage equipment.
+        /// </summary>
+        internal static Item ResolveItemForTesting(string itemName)
+        {
+            Item item = ResolveItem(itemName);
+            if (item != null) return item;
+            if (Skills.ForagingSkill.TryGetEquipmentDefinition(itemName,
+                out string slot, out string statType, out float statPerLevel,
+                out string description))
+                return CreateScaledEquipment(itemName, slot, statType,
+                    statPerLevel, description);
+            return null;
         }
 
         /// <summary>
@@ -204,33 +1273,20 @@ namespace ErenshorSkills.Items
         /// </summary>
         public static bool GiveItemToPlayer(string itemName)
         {
+            return GiveItemToPlayer(itemName, 1);
+        }
+
+        /// <summary>
+        /// Give a quantity of an item without using Erenshor's lossy trash-slot
+        /// fallback. The operation is preflighted so multi-item grants cannot
+        /// partially fill the inventory.
+        /// </summary>
+        public static bool GiveItemToPlayer(string itemName, int amount)
+        {
             try
             {
-                // First check our custom items
-                var item = GetItem(itemName);
-
-                // If not custom, check the game's native database
-                if (item == null && _itemDb != null)
-                {
-                    foreach (var gameItem in _itemDb.ItemDB)
-                    {
-                        if (gameItem != null && gameItem.ItemName == itemName)
-                        {
-                            item = gameItem;
-                            break;
-                        }
-                    }
-                }
-
-                if (item == null) return false;
-
-                var inventory = GameData.PlayerInv;
-                if (inventory == null) return false;
-
-                // Pass the SAME item instance (not a clone) for stackable items.
-                // The game's AddItemToInv uses reference equality (==) for stacking.
-                // It also calls UpdatePlayerInventory() internally.
-                return inventory.AddItemToInv(item);
+                if (amount <= 0) return false;
+                return GiveItemInstanceToPlayer(ResolveItem(itemName), amount);
             }
             catch (Exception ex)
             {
@@ -241,20 +1297,85 @@ namespace ErenshorSkills.Items
         }
 
         /// <summary>
+        /// Add a resolved item instance through Erenshor's native inventory
+        /// API. The caller owns any larger persistence transaction.
+        /// </summary>
+        internal static bool GiveItemInstanceToPlayer(Item item, int amount)
+        {
+            if (item == null || amount <= 0) return false;
+            // Corpse Bags are transaction-created recovery containers.  A
+            // normal grant would create an identity-less empty bag that could
+            // be mistaken for a real recovery, so no public/test grant path may
+            // materialize one.
+            if (BagSystem.IsCorpseBag(item.ItemName)) return false;
+            var inventory = GameData.PlayerInv;
+            if (inventory == null || !CanAddItemToPlayer(item, amount)) return false;
+
+            // Item objects are shared across all slots. Restore the immutable
+            // registered value before a grant in case a vendor mod changed it.
+            if (!string.IsNullOrEmpty(item.ItemName) &&
+                _registeredItemValues.TryGetValue(item.ItemName,
+                    out int originalValue))
+                item.ItemValue = originalValue;
+
+            if (item.Stackable)
+                return inventory.AddItemToInv(item, amount);
+
+            for (int i = 0; i < amount; i++)
+                if (!inventory.AddItemToInv(item, 1)) return false;
+            return true;
+        }
+
+        public static bool CanAddItemToPlayer(Item item, int amount = 1)
+        {
+            if (item == null || amount <= 0) return false;
+            var slots = GameData.PlayerInv?.StoredSlots;
+            if (slots == null) return false;
+
+            int empty = 0;
+            foreach (var slot in slots)
+            {
+                if (slot == null || slot.TrashSlot) continue;
+                if (item.Stackable && slot.MyItem == item)
+                    return slot.Quantity <= int.MaxValue - amount;
+                if (slot.MyItem == GameData.PlayerInv.Empty) empty++;
+            }
+            return empty >= (item.Stackable ? 1 : amount);
+        }
+
+        /// <summary>
         /// Create an equipment item with stats scaled to the player's level.
         /// Returns the created item, or null on failure.
         /// </summary>
         public static Item CreateScaledEquipment(string baseName, string slot,
             string statType, float statPerLevel, string description)
         {
+            int playerLevel = Mathf.Clamp(GameData.PlayerStats?.Level ?? 1, 1, 1000);
+            return CreateScaledEquipmentAtLevel(baseName, slot, statType,
+                statPerLevel, description, playerLevel);
+        }
+
+        private static Item CreateScaledEquipmentAtLevel(string baseName, string slot,
+            string statType, float statPerLevel, string description, int playerLevel)
+        {
             try
             {
-                int playerLevel = GameData.PlayerStats?.Level ?? 1;
+                if (string.IsNullOrWhiteSpace(baseName) ||
+                    string.IsNullOrWhiteSpace(slot) ||
+                    string.IsNullOrWhiteSpace(statType) ||
+                    float.IsNaN(statPerLevel) || float.IsInfinity(statPerLevel) ||
+                    statPerLevel <= 0f)
+                    return null;
+                playerLevel = Mathf.Clamp(playerLevel, 1, 1000);
                 int statValue = Mathf.Max(1,
                     Mathf.RoundToInt(playerLevel * statPerLevel));
+                string id = BuildForageEquipmentId(baseName, playerLevel);
+                if (_itemsById.TryGetValue(id, out Item existing) && existing != null)
+                    return existing;
 
                 // Create the item
                 var item = ScriptableObject.CreateInstance<Item>();
+                item.Id = id;
                 item.ItemName = baseName;
                 item.Lore = $"{description}\n+{statValue} {statType} (Level {playerLevel})";
                 item.ItemValue = statValue * 3;
@@ -273,6 +1394,12 @@ namespace ErenshorSkills.Items
 
                 // Set the stat bonus
                 ApplyStatToItem(item, statType, statValue);
+                ApplyVisualsToItem(item, "Foraging");
+
+                // Native inventory saves persist Item.Id. Register every scaled
+                // variant by a deterministic ID so GetItemByID can reconstruct
+                // the exact level-scaled object after restarting the game.
+                _itemsById[id] = item;
 
                 return item;
             }
@@ -281,6 +1408,45 @@ namespace ErenshorSkills.Items
                 SkillsPlugin.Log.LogError(
                     $"Failed to create scaled equipment '{baseName}': {ex.Message}");
                 return null;
+            }
+        }
+
+        private const string ForageEquipmentIdPrefix = "CS_FORAGE_";
+
+        private static string BuildForageEquipmentId(string itemName, int level)
+        {
+            string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(itemName))
+                .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+            return $"{ForageEquipmentIdPrefix}{encoded}_L{level}";
+        }
+
+        private static bool TryParseForageEquipmentId(string id,
+            out string itemName, out int level)
+        {
+            itemName = null;
+            level = 0;
+            try
+            {
+                if (string.IsNullOrEmpty(id) ||
+                    !id.StartsWith(ForageEquipmentIdPrefix,
+                        StringComparison.OrdinalIgnoreCase)) return false;
+                int levelMarker = id.LastIndexOf("_L", StringComparison.Ordinal);
+                if (levelMarker <= ForageEquipmentIdPrefix.Length ||
+                    !int.TryParse(id.Substring(levelMarker + 2), out level) ||
+                    level < 1 || level > 1000) return false;
+                string encoded = id.Substring(ForageEquipmentIdPrefix.Length,
+                    levelMarker - ForageEquipmentIdPrefix.Length)
+                    .Replace('-', '+').Replace('_', '/');
+                int padding = encoded.Length % 4;
+                if (padding != 0) encoded = encoded.PadRight(encoded.Length + 4 - padding, '=');
+                itemName = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+                return !string.IsNullOrWhiteSpace(itemName) && itemName.Length <= 256;
+            }
+            catch
+            {
+                itemName = null;
+                level = 0;
+                return false;
             }
         }
 
@@ -449,7 +1615,7 @@ namespace ErenshorSkills.Items
             RegisterSimpleItem("Petrified Heartwood", "Ancient and unyielding.", 30, "wood");
             RegisterSimpleItem("Voidtouched Timber", "Warped by dark energy.", 45, "wood");
             RegisterSimpleItem("Worldtree Splinter", "From the tree of ages.", 70, "wood");
-            RegisterSimpleItem("Beast Bone Shard", "From a lesser drake.", 20, "bone");
+            RegisterSimpleItem("Beast Bone Shard", "A shard of bone from a beast.", 5, "bone");
             RegisterSimpleItem("Elder Wyrm Bone", "Ancient dragon bone.", 50, "bone");
             RegisterSimpleItem("Titan's Knucklebone", "Massive and dense.", 75, "bone");
             // Exotic materials
@@ -485,7 +1651,6 @@ namespace ErenshorSkills.Items
             RegisterSimpleItem("Mithril Wire", "Fine wire for Jewelcraft.", 30, "crafting");
             RegisterEquipment("Forged Shield Boss", "Charm",
                 "Endurance", 7, 45, "+8 AC, +18 HP, +7 End.");
-            if (_registeredItems.TryGetValue("Forged Shield Boss", out var forged)) { forged.AC = 8; forged.HP = 18; }
             RegisterSimpleItem("Hardened Alloy Ingot", "Premium smithing material.", 80, "crafting");
             // New tier 3-7 smithing products
             RegisterSimpleItem("Silver Wire", "Fine silver wire for jewelry.", 15, "crafting");
@@ -498,9 +1663,9 @@ namespace ErenshorSkills.Items
             RegisterEquipment("Moonforged Hatchet", "Primary", "Strength", 8, 120, "Forged under moonlight, the blade holds a faint silver gleam.");
             RegisterEquipment("Sunforged Greatsword", "Primary", "Strength", 10, 200, "The blade radiates warmth. Enemies flinch before the first swing.");
             RegisterEquipment("Voidsteel Maul", "Primary", "Strength", 12, 280, "Forged from ore pulled from the void. The weight feels alive.");
-            RegisterEquipment("Titan's Bulwark", "Charm",
-                "Endurance", 24, 350, "An immovable wall of metal. Those behind it sleep soundly.");
-            if (_registeredItems.TryGetValue("Titan's Bulwark", out var titans)) { titans.AC = 36; titans.HP = 112; }
+            RegisterEquipment("Titan's Bulwark", "Secondary",
+                "Endurance", 6, 350,
+                "Shield. +15 AC, +6 End, +4 all Resists.");
             RegisterEquipment("Eternity's Edge", "Primary", "Strength", 14, 500, "The edge never dulls. Some say it cuts the moments between heartbeats.");
 
             // ── Baking results ──────────────────────────────────────
@@ -518,6 +1683,27 @@ namespace ErenshorSkills.Items
                 "Wisdom", 5, 600f);
             RegisterConsumable("Grand Ambrosia", "Divine food.", 100,
                 "Intelligence", 8, 900f);
+            // Fish recipes were present in the recipe database but were never
+            // registered as actual items, so successful combines consumed the
+            // materials and silently paid fallback gold instead.
+            RegisterConsumable("Pan-Seared Fish", "Simple cooked fish.", 8,
+                "Endurance", 3, 480f);
+            RegisterConsumable("Herb-Crusted Fish Fillet", "Seasoned fish.", 20,
+                "Endurance", 5, 600f);
+            RegisterConsumable("Spicy Fish Stew", "Warming stew.", 35,
+                "Endurance", 6, 720f);
+            RegisterConsumable("Moongill Sashimi", "Rare delicacy.", 65,
+                "Intelligence", 8, 900f);
+            RegisterConsumable("Smoked Beast-Fish Platter", "Surf and turf.", 55,
+                "Strength", 8, 900f);
+            RegisterConsumable("Golden Carp Feast", "Royal fish dish.", 110,
+                "All Stats", 10, 900f);
+            RegisterConsumable("Wyrm-Smoked Fish", "Dragon-smoked fish.", 145,
+                "Strength", 11, 1080f);
+            RegisterConsumable("Starmetal-Glazed Catch", "Cosmic seafood.", 220,
+                "All Stats", 12, 1200f);
+            RegisterConsumable("Celestial Fish Pie", "Heavenly fish pie.", 350,
+                "All Stats", 14, 1500f);
             // New tier 3-7 baking products
             RegisterConsumable("Ironbark Smoked Meat", "Hearty smoked meat.", 25, "Endurance", 6, 600f);
             RegisterConsumable("Frostberry Tart", "Chilled dessert.", 35, "Intelligence", 7, 600f);
@@ -560,27 +1746,30 @@ namespace ErenshorSkills.Items
             RegisterSimpleItem("Iron-Tipped Arrows (20)", "+5% ranged damage.", 10, "ammo");
             RegisterSimpleItem("Windwashed Arrows (20)", "+10% ranged damage.", 25, "ammo");
             RegisterSimpleItem("Bonesteel Arrows (20)", "+20% ranged damage.", 70, "ammo");
-            RegisterEquipment("Crude Shortbow", "Primary",
-                "Dexterity", 1, 8, "Bent wood and rough string. It fires. Mostly.");
-            RegisterEquipment("Strung Hunting Bow", "Primary",
-                "Dexterity", 2, 15, "Properly strung with decent pull. A real step up.");
-            RegisterEquipment("Hunting Shortbow", "Primary",
-                "Dexterity", 3, 20, "A short hunting bow, compact enough for the brush.");
-            RegisterEquipment("Composite Longbow", "Primary",
-                "Strength", 5, 50, "Layers of sinew and horn give it power beyond its size.");
-            RegisterEquipment("Azynthi Recurve", "Primary",
-                "Dexterity", 7, 130, "Carved from a living Azynthi branch. It hums when drawn.");
+            RegisterWeapon("Crude Shortbow", "Primary", 5,
+                3, 4.0f, "Dexterity", 1, 8, "Bent wood and rough string. It fires. Mostly.");
+            RegisterWeapon("Strung Hunting Bow", "Primary", 5,
+                5, 3.8f, "Dexterity", 2, 15, "Properly strung with decent pull. A real step up.");
+            RegisterWeapon("Hunting Shortbow", "Primary", 5,
+                7, 3.5f, "Dexterity", 3, 20, "A short hunting bow, compact enough for the brush.");
+            RegisterWeapon("Composite Longbow", "Primary", 5,
+                12, 4.2f, "Strength", 5, 50, "Layers of sinew and horn give it power beyond its size.");
+            RegisterWeapon("Azynthi Recurve", "Primary", 5,
+                18, 3.6f, "Dexterity", 7, 130, "Carved from a living Azynthi branch. It hums when drawn.");
             // New tier 3-7 fletching products
             RegisterSimpleItem("Ironbark Shaft", "Strong arrow shaft.", 20, "crafting");
             RegisterSimpleItem("Silver-Tipped Arrows (20)", "+15% ranged damage.", 30, "ammo");
             RegisterSimpleItem("Petrified Bow Stave", "Ancient bow stave.", 40, "crafting");
-            RegisterEquipment("Wyrm Bone Bow", "Primary", "Strength", 8, 80, "Built from the ribcage of a wyrm. Arrows fly straight and true.");
+            RegisterWeapon("Wyrm Bone Bow", "Primary", 5,
+                22, 4.5f, "Strength", 8, 80, "Built from the ribcage of a wyrm. Arrows fly straight and true.");
             RegisterSimpleItem("Voidtipped Arrows (20)", "+25% ranged damage.", 60, "ammo");
             RegisterSimpleItem("Worldtree Bow Limb", "Legendary bow wood.", 80, "crafting");
             RegisterSimpleItem("Starmetal Arrowheads", "Celestial arrowheads.", 70, "crafting");
             RegisterSimpleItem("Starfire Arrows (20)", "+35% ranged damage.", 120, "ammo");
-            RegisterEquipment("Titan's Longbow", "Primary", "Dexterity", 12, 250, "It takes two hands and considerable will to draw this string.");
-            RegisterEquipment("Bow of the Cosmos", "Primary", "Dexterity", 14, 450, "Arrows loosed from this bow arrive before the string finishes vibrating.");
+            RegisterWeapon("Titan's Longbow", "Primary", 5,
+                35, 4.8f, "Dexterity", 12, 250, "It takes two hands and considerable will to draw this string.");
+            RegisterWeapon("Bow of the Cosmos", "Primary", 5,
+                42, 3.4f, "Dexterity", 14, 450, "Arrows loosed from this bow arrive before the string finishes vibrating.");
             RegisterSimpleItem("Eternity's Volley (20)", "+45% ranged damage.", 500, "ammo");
 
             // ── Jewelcraft results ──────────────────────────────────
@@ -665,11 +1854,22 @@ namespace ErenshorSkills.Items
                 "Right-click to open. 8 item slots.", 35, "crafting");
             RegisterSimpleItem("Adventurer's Backpack",
                 "Right-click to open. 10 item slots. Sturdy and spacious.", 80, "crafting");
+            RegisterSimpleItem(BagSystem.ThrallBagName,
+                "A four-slot necromantic armory. Weapons and shields placed " +
+                "inside are visibly equipped by your Bone Thrall. Use one " +
+                "two-handed weapon or bow, or one one-handed weapon with a " +
+                "shield or offhand-compatible weapon.",
+                0, "crafting");
+            RegisterSimpleItem(BagSystem.CorpseBagName,
+                "Recovered belongings. Items can only be removed; the bag disappears when empty.",
+                0, "crafting");
             // Make bags right-clickable via dummy spell
             SetupBagItem("Silken Pouch");
             SetupBagItem("Herbalist's Satchel");
             SetupBagItem("Simple Backpack");
             SetupBagItem("Adventurer's Backpack");
+            SetupBagItem(BagSystem.ThrallBagName);
+            SetupBagItem(BagSystem.CorpseBagName);
             RegisterEquipment("Padded Leather Vest", "Chest",
                 "Endurance", 5, 25, "A vest of padded leather, worn and serviceable.");
             if (_registeredItems.TryGetValue("Padded Leather Vest", out var padded)) { padded.AC = 12; padded.HP = 30; }
@@ -799,36 +1999,55 @@ namespace ErenshorSkills.Items
             RegisterSimpleItem("Voidheart Cordial", "Void elixir. +13 all stats, +10 all Resists for 22 min.", 410, "consumable");
             RegisterSimpleItem("Sunfire Phoenix Lager", "Solar-fire beer. +15 Str, +15 End, +10 Fire Resist for 22 min.", 440, "consumable");
             RegisterSimpleItem("Worldtree Ambrosia", "World drink. +14 all stats, +4% haste for 22 min.", 470, "consumable");
-            RegisterSimpleItem("Goblin Shortbow", "Crude bow. +2 Dex.", 8, "ammo");
+            RegisterWeapon("Goblin Shortbow", "Primary", 5,
+                4, 3.8f, "Dexterity", 2, 8, "Crude bow. +2 Dex.");
             RegisterSimpleItem("Poisoned Arrows (20)", "Toxic arrows. +8% ranged damage, +poison proc.", 15, "ammo");
-            RegisterEquipment("Fernallan Longbow", "Primary", "Dexterity", 2, 22, "Grown, not carved. The string hums with druidic blessing.");
+            RegisterWeapon("Fernallan Longbow", "Primary", 5,
+                6, 4.0f, "Dexterity", 2, 22, "Grown, not carved. The string hums with druidic blessing.");
             RegisterSimpleItem("Sharpbone Bolts (20)", "Bone bolts. +12% ranged damage.", 28, "ammo");
-            RegisterEquipment("Windrunner Bow", "Primary", "Dexterity", 3, 38, "Light enough to fire while sprinting. Try not to miss.");
+            RegisterWeapon("Windrunner Bow", "Primary", 5,
+                9, 3.2f, "Dexterity", 3, 38, "Light enough to fire while sprinting. Try not to miss.");
             RegisterSimpleItem("Blighted Arrows (20)", "Cursed arrows. +14% ranged damage, +poison proc.", 45, "ammo");
-            RegisterEquipment("Boneframe Recurve", "Primary", "Dexterity", 3, 55, "The limbs flex with unnatural strength. Bone remembers.");
+            RegisterWeapon("Boneframe Recurve", "Primary", 5,
+                11, 3.6f, "Dexterity", 3, 55, "The limbs flex with unnatural strength. Bone remembers.");
             RegisterSimpleItem("Razorbone Arrows (20)", "Wyrm arrows. +18% ranged damage.", 65, "ammo");
-            RegisterEquipment("Runewood Longbow", "Primary", "Dexterity", 4, 75, "Runes burned into the stave guide arrows to their mark.");
-            RegisterEquipment("Ironbark War Bow", "Primary", "Dexterity", 4, 85, "Draw weight that breaks lesser arms. Worth the effort.");
+            RegisterWeapon("Runewood Longbow", "Primary", 5,
+                14, 4.0f, "Dexterity", 4, 75, "Runes burned into the stave guide arrows to their mark.");
+            RegisterWeapon("Ironbark War Bow", "Primary", 5,
+                16, 4.2f, "Dexterity", 4, 85, "Draw weight that breaks lesser arms. Worth the effort.");
             RegisterSimpleItem("Adamantite Arrowheads (20)", "Hard arrows. +22% ranged damage.", 95, "ammo");
-            RegisterEquipment("Nightstalker Bow", "Primary", "Dexterity", 5, 110, "Silent and deadly. Targets never hear it.");
+            RegisterWeapon("Nightstalker Bow", "Primary", 5,
+                20, 3.4f, "Dexterity", 5, 110, "Silent and deadly. Targets never hear it.");
             RegisterSimpleItem("Moonsilver Arrows (20)", "Silver arrows. +26% ranged damage.", 120, "ammo");
-            RegisterEquipment("Sunfire Longbow", "Primary", "Dexterity", 6, 135, "Arrows leave trails of light. Beautiful and lethal.");
-            RegisterEquipment("Wyrm Sinew Composite", "Primary", "Dexterity", 6, 155, "Strung with wyrm sinew. The draw feels almost eager.");
+            RegisterWeapon("Sunfire Longbow", "Primary", 5,
+                24, 4.0f, "Dexterity", 6, 135, "Arrows leave trails of light. Beautiful and lethal.");
+            RegisterWeapon("Wyrm Sinew Composite", "Primary", 5,
+                26, 3.6f, "Dexterity", 6, 155, "Strung with wyrm sinew. The draw feels almost eager.");
             RegisterSimpleItem("Voidtipped Bolts (20)", "Dark bolts. +28% ranged damage.", 145, "ammo");
-            RegisterEquipment("Phoenix Recurve", "Primary", "Dexterity", 7, 170, "Arrows ignite mid-flight. A spectacular way to die.");
-            RegisterEquipment("Starmetal Bow", "Primary", "Dexterity", 7, 190, "The metal fell from the sky. Arrows seem to fall upward.");
+            RegisterWeapon("Phoenix Recurve", "Primary", 5,
+                28, 3.4f, "Dexterity", 7, 170, "Arrows ignite mid-flight. A spectacular way to die.");
+            RegisterWeapon("Starmetal Bow", "Primary", 5,
+                30, 3.8f, "Dexterity", 7, 190, "The metal fell from the sky. Arrows seem to fall upward.");
             RegisterSimpleItem("Abyssal Arrows (20)", "Void arrows. +32% ranged damage.", 210, "ammo");
-            RegisterEquipment("Titan's Warbow", "Primary", "Dexterity", 8, 225, "Meant for siege warfare. Effective at any range.");
-            RegisterEquipment("Dragonlord's Greatbow", "Primary", "Dexterity", 8, 250, "Scorched by dragonfire during its making. The heat lingers.");
+            RegisterWeapon("Titan's Warbow", "Primary", 5,
+                33, 4.6f, "Dexterity", 8, 225, "Meant for siege warfare. Effective at any range.");
+            RegisterWeapon("Dragonlord's Greatbow", "Primary", 5,
+                36, 4.8f, "Dexterity", 8, 250, "Scorched by dragonfire during its making. The heat lingers.");
             RegisterSimpleItem("Celestial Arrows (20)", "Holy arrows. +36% ranged damage.", 270, "ammo");
-            RegisterEquipment("Voidweave Longbow", "Primary", "Dexterity", 9, 295, "Arrows vanish after leaving the string. They reappear inside the target.");
-            RegisterEquipment("Soulfire Bow", "Primary", "Dexterity", 9, 320, "Arrows carry a piece of the wielder's fury. It always comes back.");
+            RegisterWeapon("Voidweave Longbow", "Primary", 5,
+                38, 3.6f, "Dexterity", 9, 295, "Arrows vanish after leaving the string. They reappear inside the target.");
+            RegisterWeapon("Soulfire Bow", "Primary", 5,
+                40, 3.4f, "Dexterity", 9, 320, "Arrows carry a piece of the wielder's fury. It always comes back.");
             RegisterSimpleItem("Prismatic Arrows (20)", "Elemental arrows. +40% ranged damage.", 350, "ammo");
-            RegisterEquipment("Worldtree Warbow", "Primary", "Dexterity", 9, 380, "Carved from the oldest living wood. It still grows leaves.");
-            RegisterEquipment("Phoenix Flight Bow", "Primary", "Dexterity", 9, 410, "Every arrow is a tiny sun. Shadows flee before them.");
-            RegisterEquipment("Void Hunter's Bow", "Primary", "Dexterity", 9, 430, "Tracks its quarry through dimensions. There is no hiding.");
+            RegisterWeapon("Worldtree Warbow", "Primary", 5,
+                43, 4.0f, "Dexterity", 9, 380, "Carved from the oldest living wood. It still grows leaves.");
+            RegisterWeapon("Phoenix Flight Bow", "Primary", 5,
+                45, 3.2f, "Dexterity", 9, 410, "Every arrow is a tiny sun. Shadows flee before them.");
+            RegisterWeapon("Void Hunter's Bow", "Primary", 5,
+                47, 3.4f, "Dexterity", 9, 430, "Tracks its quarry through dimensions. There is no hiding.");
             RegisterSimpleItem("Starfall Arrows (20)", "Meteor arrows. +42% ranged damage.", 460, "ammo");
-            RegisterEquipment("Titan Slayer's Longbow", "Primary", "Dexterity", 9, 480, "Built to bring down gods. The string hums with restrained power.");
+            RegisterWeapon("Titan Slayer's Longbow", "Primary", 5,
+                50, 4.2f, "Dexterity", 9, 480, "Built to bring down gods. The string hums with restrained power.");
             RegisterEquipment("Goblin Tooth Necklace", "Neck", "Strength", 1, 5, "Crude necklace. +2 Str.");
             RegisterEquipment("Fernallan Leaf Brooch", "Charm", "Intelligence", 1, 12, "Nature brooch. +3 Wis, +2 Int.");
             RegisterEquipment("Braxonian Sand Ring", "Ring", "Strength", 2, 20, "Desert ring. +4 End, +3 Str.");
@@ -916,6 +2135,11 @@ namespace ErenshorSkills.Items
         {
             if (_registeredItems.ContainsKey(name)) return;
 
+            // Erenshor's native vendor rejects zero-value items outright.
+            // Even flavor junk and water need a minimum value to remain
+            // sellable instead of becoming permanent inventory clutter.
+            goldValue = Mathf.Max(1, goldValue);
+
             var item = ScriptableObject.CreateInstance<Item>();
             item.ItemName = name;
             item.Lore = desc;
@@ -925,11 +2149,38 @@ namespace ErenshorSkills.Items
             item.ItemIcon = FindIcon(name, iconCategory);
 
             _registeredItems[name] = item;
+            _registeredItemValues[name] = goldValue;
             InjectIntoDatabase(item);
 
             // Attach buff spells to consumable items (food/drinks)
             if (iconCategory == "consumable" || iconCategory == "food" || iconCategory == "drink")
+            {
                 ErenshorSkills.Items.ConsumableBuffs.AttachBuffToItem(item, desc);
+                if (item.ItemEffectOnClick != null)
+                {
+                    string category = ResolveConsumableCategory(name, iconCategory);
+                    float duration = Mathf.Max(3f,
+                        item.ItemEffectOnClick.SpellDurationInTicks * 3f);
+                    ConsumableBuffs[name] = ("Custom", 0, duration, category);
+                    ErenshorSkills.Items.ConsumableBuffs.RegisterBuffTemplate(
+                        name, item.ItemEffectOnClick, category);
+                }
+            }
+        }
+
+        private static string ResolveConsumableCategory(string itemName,
+            string iconCategory)
+        {
+            foreach (var recipe in
+                Skills.Tradeskills.GetRecipesForSkillPublic("Brewing"))
+                if (string.Equals(recipe.Name, itemName,
+                    StringComparison.OrdinalIgnoreCase)) return "Drink";
+            foreach (var recipe in
+                Skills.Tradeskills.GetRecipesForSkillPublic("Baking"))
+                if (string.Equals(recipe.Name, itemName,
+                    StringComparison.OrdinalIgnoreCase)) return "Food";
+            return string.Equals(iconCategory, "drink",
+                StringComparison.OrdinalIgnoreCase) ? "Drink" : "Food";
         }
 
         private static void RegisterConsumable(string name, string desc,
@@ -938,9 +2189,14 @@ namespace ErenshorSkills.Items
         {
             if (_registeredItems.ContainsKey(name)) return;
 
+            // The recipe description is the player-facing contract. It may list
+            // several attributes (or "all stats"), while the legacy registration
+            // arguments can represent only one. Build the effect from the recipe.
+            string effectDescription = GetRecipeDescription(name) ?? desc;
+
             var item = ScriptableObject.CreateInstance<Item>();
             item.ItemName = name;
-            item.Lore = $"{desc}\nUse: +{statBonus * 5} HP, +{statBonus} {statType} for {duration / 60f:F0} min.\n<color={(category == "Drink" ? "#4FC3F7" : "#8BC34A")}>[{category}]</color>";
+            item.Lore = $"{effectDescription}\n<color={(category == "Drink" ? "#4FC3F7" : "#8BC34A")}>[{category}]</color>";
             item.ItemValue = goldValue;
             item.Disposable = true;  // Right-click to consume
             item.Stackable = true;   // Food stacks in inventory
@@ -950,42 +2206,31 @@ namespace ErenshorSkills.Items
             // Track buff data for our custom consumption handler
             ConsumableBuffs[name] = (statType, statBonus, duration, category);
 
-            // Create a minimal spell so the game shows "Activatable" on the item.
-            // Our Patch_UseCustomConsumable prefix intercepts before CastSpell runs.
-            try
-            {
-                var spell = ScriptableObject.CreateInstance<Spell>();
-                spell.SpellName = $"{name} Buff";
-                spell.SpellDesc = $"+{statBonus} {statType} for {duration / 60f:F0} min.";
-                spell.StatusEffectMessageOnPlayer = $"You feel nourished.";
-                // Game displays ticks * 3 as seconds, so divide by 3 for correct duration
-                spell.SpellDurationInTicks = Mathf.Max(1, Mathf.RoundToInt(duration / 3f));
-                spell.ManaCost = 0;
-                spell.SpellChargeTime = 0f;
-                spell.InflictOnSelf = true;
-                spell.SelfOnly = true;
-                spell.InstantEffect = false;
-                spell.SpellRange = 0f;
-                // Initialize lists to prevent NullReferenceException in StartSpell
-                spell.ChargeVariations = new System.Collections.Generic.List<AudioClip>();
-                spell.UsedBy = new System.Collections.Generic.List<Class>();
-                try
-                {
-                    var tf = typeof(Spell).GetField("Type");
-                    if (tf != null) tf.SetValue(spell, Enum.ToObject(tf.FieldType, 2));
-                    var lf = typeof(Spell).GetField("Line");
-                    if (lf != null) lf.SetValue(spell, Enum.ToObject(lf.FieldType, 29));
-                }
-                catch { }
-                ApplyStatToSpell(spell, statType, statBonus);
-                spell.HP = statBonus * 5; // HP bonus for regen
-                spell.SpellIcon = item.ItemIcon;
-                item.ItemEffectOnClick = spell;
-            }
-            catch { }
+            // Parse and attach every stat in the authoritative description.
+            ErenshorSkills.Items.ConsumableBuffs.AttachBuffToItem(item, effectDescription);
+
+            // Description-free legacy items still need an activatable template.
+            if (item.ItemEffectOnClick == null)
+                item.ItemEffectOnClick = CreateBuffSpell(name, statType, statBonus, duration);
+            ErenshorSkills.Items.ConsumableBuffs.RegisterBuffTemplate(
+                name, item.ItemEffectOnClick, category);
 
             _registeredItems[name] = item;
+            _registeredItemValues[name] = goldValue;
             InjectIntoDatabase(item);
+        }
+
+        private static string GetRecipeDescription(string itemName)
+        {
+            string[] tradeskills =
+                { "Smithing", "Baking", "Brewing", "Fletching", "Jewelcraft", "Tailoring" };
+            foreach (string tradeskill in tradeskills)
+            {
+                foreach (var recipe in Skills.Tradeskills.GetRecipesForSkillPublic(tradeskill))
+                    if (string.Equals(recipe.Name, itemName, StringComparison.OrdinalIgnoreCase))
+                        return recipe.ResultDescription;
+            }
+            return null;
         }
 
         /// <summary>
@@ -999,6 +2244,7 @@ namespace ErenshorSkills.Items
             try
             {
                 var spell = ScriptableObject.CreateInstance<Spell>();
+                spell.Id = "CS_Buff_" + itemName.Replace(" ", "_");
                 spell.SpellName = $"{itemName} Buff";
                 spell.SpellDesc = $"+{statBonus} {statType}";
                 spell.StatusEffectMessageOnPlayer = $"You feel nourished. (+{statBonus} {statType})";
@@ -1026,10 +2272,9 @@ namespace ErenshorSkills.Items
                     SkillsPlugin.Log.LogWarning($"Spell enum set failed: {enumEx.Message}");
                 }
 
-                // Duration in ticks (game ticks are ~6 seconds each)
-                // duration param is in seconds, so 120s = 20 ticks
+                // Stats.TickEffects runs every 3 seconds in the current game.
                 spell.SpellDurationInTicks = Mathf.Max(1,
-                    Mathf.RoundToInt(duration / 6f));
+                    Mathf.RoundToInt(duration / 3f));
 
                 // Apply the stat
                 ApplyStatToSpell(spell, statType, statBonus);
@@ -1083,17 +2328,23 @@ namespace ErenshorSkills.Items
             }
             catch { }
             item.ItemIcon = FindIcon(name, "equipment");
+            item.Shield = string.Equals(slot, "Secondary",
+                StringComparison.OrdinalIgnoreCase);
 
             ApplyStatToItem(item, statType, statBonus);
 
             // Auto-detect weapon type from item name for Primary slot items
+            int detectedWeaponType = 0;
             if (slot == "Primary" || slot == "PrimaryOrSecondary")
             {
-                string lower = name.ToLower();
+                string lower = name.ToLowerInvariant();
                 int wtype = 0; // None
-                if (lower.Contains("dagger") || lower.Contains("shiv") || lower.Contains("knife"))
+                if (lower.Contains("dagger") || lower.Contains("shiv") || lower.Contains("knife") ||
+                    lower.Contains("kukri") || lower.Contains("dirk"))
                     wtype = 3; // OneHandDagger
-                else if (lower.Contains("greatsword") || lower.Contains("maul") || lower.Contains("halberd") || lower.Contains("flamberge"))
+                else if (lower.Contains("greatsword") || lower.Contains("maul") || lower.Contains("halberd") ||
+                         lower.Contains("flamberge") || lower.Contains("claymore") || lower.Contains("lance") ||
+                         lower.Contains("partisan") || lower.Contains("warhammer") || lower.Contains("bastard sword"))
                     wtype = 2; // TwoHandMelee
                 else if (lower.Contains("staff") || lower.Contains("stave"))
                     wtype = 4; // TwoHandStaff
@@ -1101,10 +2352,13 @@ namespace ErenshorSkills.Items
                     wtype = 5; // TwoHandBow
                 else if (lower.Contains("sword") || lower.Contains("axe") || lower.Contains("mace") || lower.Contains("rapier") ||
                          lower.Contains("scimitar") || lower.Contains("hatchet") || lower.Contains("pick") || lower.Contains("blade") ||
-                         lower.Contains("club") || lower.Contains("edge"))
+                         lower.Contains("club") || lower.Contains("edge") || lower.Contains("cleaver") ||
+                         lower.Contains("falchion") || lower.Contains("hammer") || lower.Contains("flail") ||
+                         lower.Contains("khopesh"))
                     wtype = 1; // OneHandMelee
                 if (wtype > 0)
                 {
+                    detectedWeaponType = wtype;
                     try
                     {
                         var wtField = typeof(Item).GetField("ThisWeaponType");
@@ -1118,9 +2372,49 @@ namespace ErenshorSkills.Items
             // Borrow 3D model and icon from matching game item
             string tradeskillGuess = GuessItemTradeskill(name, slot);
             ApplyVisualsToItem(item, tradeskillGuess);
+            ApplySemanticEquipmentVisual(item);
+            ApplyRecipeStatsToItem(item, name);
+            ApplyDefaultWeaponStats(item, detectedWeaponType);
+            ApplyCraftedOffhandEligibility(item);
+            ApplyCraftedOffhandVisualCompatibility(item);
+            SimPlayerCraftedItems.PrepareCraftedEquipment(item);
 
             _registeredItems[name] = item;
+            _registeredItemValues[name] = goldValue;
             InjectIntoDatabase(item);
+        }
+
+        /// <summary>
+        /// Nearest-level borrowing can select DEFAULT (invisible) or a helmet
+        /// for named jewelry headpieces. Keep those items visible and visually
+        /// consistent with their advertised equipment type.
+        /// </summary>
+        private static void ApplySemanticEquipmentVisual(Item item)
+        {
+            if (item == null) return;
+            switch (item.ItemName)
+            {
+                case "Banded Iron Helm":
+                    item.EquipmentToActivate = "MetalHelm";
+                    break;
+                case "Ironhide Gauntlets":
+                    // Palmwraps exists in the item database but not beneath
+                    // every live modular player rig. ArmoredGlove is present on
+                    // both hand roots and matches the item's plated appearance.
+                    item.EquipmentToActivate = "ArmoredGlove";
+                    break;
+                case "Crown of the Void":
+                case "Diamond Encrusted Circlet":
+                case "Eternity's Diadem":
+                case "Moonpetal Circlet":
+                case "Phoenix Crown":
+                case "Shimmerweave Crown":
+                case "Starweave Crown":
+                case "Starweave Tiara":
+                case "Titan's Eye Circlet":
+                    item.EquipmentToActivate = "Crown";
+                    break;
+            }
         }
 
         /// <summary>
@@ -1160,12 +2454,42 @@ namespace ErenshorSkills.Items
             catch { }
             item.ItemIcon = FindIcon(name, "equipment");
             if (statBonus > 0) ApplyStatToItem(item, statType, statBonus);
+            ApplyRecipeStatsToItem(item, name);
+
+            if (weaponType == 5)
+            {
+                item.IsBow = true;
+                item.BowRange = 25;
+                item.BowArrowSpeed = 18f;
+            }
+
+            ApplyCraftedOffhandEligibility(item);
 
             string tradeskillGuess = GuessItemTradeskill(name, slot);
             ApplyVisualsToItem(item, tradeskillGuess);
+            ApplyCraftedOffhandVisualCompatibility(item);
+            SimPlayerCraftedItems.PrepareCraftedEquipment(item);
 
             _registeredItems[name] = item;
+            _registeredItemValues[name] = goldValue;
             InjectIntoDatabase(item);
+        }
+
+        private static void ApplyCraftedOffhandEligibility(Item item)
+        {
+            if (item == null ||
+                !CraftedOffhandWeaponNames.Contains(item.ItemName)) return;
+            bool oneHand = item.ThisWeaponType == Item.WeaponType.OneHandMelee ||
+                item.ThisWeaponType == Item.WeaponType.OneHandDagger;
+            if (oneHand && item.RequiredSlot == Item.SlotType.Primary)
+                item.RequiredSlot = Item.SlotType.PrimaryOrSecondary;
+        }
+
+        private static void ApplyCraftedOffhandVisualCompatibility(Item item)
+        {
+            if (item == null || !CraftedOffhandVisualOverrides.TryGetValue(
+                item.ItemName, out string model)) return;
+            item.EquipmentToActivate = model;
         }
 
         /// <summary>
@@ -1188,12 +2512,14 @@ namespace ErenshorSkills.Items
             item.SpellCastTime = 0f;
             item.Stackable = false; // Bags don't stack
             item.Disposable = false; // Don't consume the bag!
+            item.NoTradeNoDestroy = true; // Contents are character-sidecar bound
+            item.PlayerCannotSell = true;
         }
 
         /// <summary>Guess which tradeskill made this item based on name/slot.</summary>
         private static string GuessItemTradeskill(string name, string slot)
         {
-            string lower = name.ToLower();
+            string lower = name.ToLowerInvariant();
             // Bows/arrows = fletching
             if (lower.Contains("bow") || lower.Contains("arrow") || lower.Contains("bolt") ||
                 lower.Contains("crossbow") || lower.Contains("quiver"))
@@ -1239,7 +2565,21 @@ namespace ErenshorSkills.Items
         /// <summary>Get a custom item by its CS_ Id.</summary>
         public static Item GetItemById(string id)
         {
-            _itemsById.TryGetValue(id, out var item);
+            if (string.IsNullOrEmpty(id)) return null;
+            if (_itemsById.TryGetValue(id, out var item))
+            {
+                if (item != null) return item;
+                _itemsById.Remove(id);
+            }
+
+            if (TryParseForageEquipmentId(id, out string itemName, out int level) &&
+                Skills.ForagingSkill.TryGetEquipmentDefinition(itemName,
+                    out string slot, out string statType, out float statPerLevel,
+                    out string description))
+            {
+                item = CreateScaledEquipmentAtLevel(itemName, slot, statType,
+                    statPerLevel, description, level);
+            }
             return item;
         }
 
@@ -1311,7 +2651,9 @@ namespace ErenshorSkills.Items
 
         /// <summary>
         /// Apply icon and 3D visuals from a matching game item to a custom item.
-        /// Borrows the 3D mesh and applies a custom color tint to distinguish it.
+        /// Borrow the native material colors and add only a restrained,
+        /// item-themed accent.  Replacing every material channel with one
+        /// tradeskill color made all tailored armor render hot pink.
         /// </summary>
         public static void ApplyVisualsToItem(Item item, string tradeskill)
         {
@@ -1375,15 +2717,68 @@ namespace ErenshorSkills.Items
                 if (item.ItemIcon == null && vis.Icon != null)
                     item.ItemIcon = vis.Icon;
 
-                // Apply a tradeskill-tinted color to distinguish from the original
-                Color tint = GetTradeskillTint(tradeskill);
-                item.ItemPrimaryColor = tint;
-                item.ItemSecondaryColor = Color.Lerp(tint, Color.black, 0.3f);
-                item.ItemMetalPrimary = Color.Lerp(tint, Color.white, 0.2f);
-                item.ItemMetalSecondary = Color.Lerp(tint, Color.gray, 0.3f);
-                item.ItemLeatherPrimary = Color.Lerp(tint, new Color(0.4f, 0.25f, 0.1f), 0.4f);
-                item.ItemLeatherSecondary = Color.Lerp(tint, new Color(0.3f, 0.2f, 0.1f), 0.5f);
+                Color accent = GetItemVisualAccent(item.ItemName, tradeskill);
+                item.ItemPrimaryColor = BlendNativeColor(vis.PrimaryColor,
+                    accent, 0.20f, new Color(0.48f, 0.44f, 0.40f));
+                item.ItemSecondaryColor = BlendNativeColor(vis.SecondaryColor,
+                    Color.Lerp(accent, Color.black, 0.28f), 0.17f,
+                    new Color(0.28f, 0.26f, 0.25f));
+                item.ItemMetalPrimary = BlendNativeColor(vis.MetalPrimary,
+                    Color.Lerp(accent, new Color(0.55f, 0.58f, 0.62f), 0.60f),
+                    0.12f, new Color(0.48f, 0.50f, 0.54f));
+                item.ItemMetalSecondary = BlendNativeColor(vis.MetalSecondary,
+                    Color.Lerp(accent, new Color(0.30f, 0.32f, 0.36f), 0.70f),
+                    0.10f, new Color(0.30f, 0.32f, 0.36f));
+                item.ItemLeatherPrimary = BlendNativeColor(vis.LeatherPrimary,
+                    Color.Lerp(accent, new Color(0.34f, 0.23f, 0.13f), 0.68f),
+                    0.14f, new Color(0.34f, 0.23f, 0.13f));
+                item.ItemLeatherSecondary = BlendNativeColor(vis.LeatherSecondary,
+                    Color.Lerp(accent, new Color(0.23f, 0.16f, 0.10f), 0.72f),
+                    0.12f, new Color(0.23f, 0.16f, 0.10f));
             }
+        }
+
+        private static Color BlendNativeColor(Color native, Color accent,
+            float accentStrength, Color fallback)
+        {
+            bool missing = native.a <= 0.001f && native.r <= 0.001f &&
+                native.g <= 0.001f && native.b <= 0.001f;
+            Color basis = missing ? fallback : native;
+            basis.a = 1f;
+            accent.a = 1f;
+            Color result = Color.Lerp(basis, accent,
+                Mathf.Clamp01(accentStrength));
+            result.a = 1f;
+            return result;
+        }
+
+        private static Color GetItemVisualAccent(string itemName,
+            string tradeskill)
+        {
+            string name = (itemName ?? "").ToLowerInvariant();
+            if (name.Contains("void") || name.Contains("abyss") ||
+                name.Contains("dusk") || name.Contains("night") ||
+                name.Contains("soul"))
+                return new Color(0.24f, 0.18f, 0.34f);
+            if (name.Contains("moon") || name.Contains("star") ||
+                name.Contains("celestial") || name.Contains("shimmer") ||
+                name.Contains("etern"))
+                return new Color(0.34f, 0.46f, 0.66f);
+            if (name.Contains("phoenix") || name.Contains("sun") ||
+                name.Contains("ember") || name.Contains("fire"))
+                return new Color(0.66f, 0.25f, 0.13f);
+            if (name.Contains("worldtree") || name.Contains("ironbark") ||
+                name.Contains("meadow") || name.Contains("verdant") ||
+                name.Contains("moss"))
+                return new Color(0.27f, 0.43f, 0.24f);
+            if (name.Contains("iron") || name.Contains("steel") ||
+                name.Contains("titan") || name.Contains("silver") ||
+                name.Contains("war"))
+                return new Color(0.40f, 0.43f, 0.49f);
+            if (name.Contains("dragon") || name.Contains("wyrm") ||
+                name.Contains("scale") || name.Contains("bone"))
+                return new Color(0.42f, 0.32f, 0.22f);
+            return GetTradeskillTint(tradeskill);
         }
 
         /// <summary>Get a unique color tint per tradeskill.</summary>
@@ -1396,7 +2791,7 @@ namespace ErenshorSkills.Items
                 case "Brewing":    return new Color(0.50f, 0.30f, 0.60f); // Deep purple
                 case "Fletching":  return new Color(0.35f, 0.60f, 0.25f); // Forest green
                 case "Jewelcraft": return new Color(0.30f, 0.50f, 0.85f); // Sapphire blue
-                case "Tailoring":  return new Color(0.70f, 0.25f, 0.45f); // Crimson
+                case "Tailoring":  return new Color(0.43f, 0.30f, 0.35f); // Muted wine
                 default:           return Color.gray;
             }
         }
@@ -1433,7 +2828,7 @@ namespace ErenshorSkills.Items
         /// </summary>
         private static string FindGameIconMatch(string itemName, string category)
         {
-            string lower = itemName.ToLower();
+            string lower = itemName.ToLowerInvariant();
 
             // ── Direct name matches (our item name = game item name) ─
             if (_gameIconMap.ContainsKey(itemName))
@@ -1441,7 +2836,7 @@ namespace ErenshorSkills.Items
 
             // ── Specific item overrides (best visual match) ──────────
             // Bags/containers → game has actual bag icons
-            if (lower.Contains("pouch") || lower.Contains("satchel") ||
+            if (lower.Contains("bag") || lower.Contains("pouch") || lower.Contains("satchel") ||
                 lower.Contains("backpack") || lower.Contains("pack"))
                 return FindFirst("Tamer's Pack", "Bag of Offering Stones", "A Magical Bag", "Bag of Faerie Dust");
 
@@ -1743,7 +3138,8 @@ namespace ErenshorSkills.Items
                     ChatHelper.Send($"  <color=#FF6666>{name}</color>");
             }
             // Also write to log file
-            string path = Path.Combine(BepInEx.Paths.ConfigPath, "ClassicSkills", "dumps", "missing_icons.txt");
+            string path = Path.Combine(RuntimePaths.DataDirectory,
+                "dumps", "missing_icons.txt");
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             var lines = new List<string>();
             lines.Add($"=== ICON REPORT: {total} items, {borrowed} borrowed, {procedural.Count} procedural, {missing.Count} missing ===\n");
@@ -1758,6 +3154,25 @@ namespace ErenshorSkills.Items
         /// <summary>Load PNG files from the external icons folder.</summary>
         private static void LoadExternalIcons()
         {
+            // 1. Load from embedded DLL resources first
+            try
+            {
+                if (EmbeddedResources.HasEmbeddedResources())
+                {
+                    var embedded = EmbeddedResources.LoadAllIcons();
+                    foreach (var kvp in embedded)
+                    {
+                        if (!_iconCache.ContainsKey(kvp.Key))
+                            _iconCache[kvp.Key] = kvp.Value;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning($"Failed to load embedded icons: {ex.Message}");
+            }
+
+            // 2. Then load from disk (overrides embedded, allows user customization)
             if (!Directory.Exists(IconFolder)) return;
 
             string[] pngFiles = Directory.GetFiles(IconFolder, "*.png");
@@ -1776,6 +3191,12 @@ namespace ErenshorSkills.Items
                             new Rect(0, 0, tex.width, tex.height),
                             new Vector2(0.5f, 0.5f), 100f);
                         _iconCache[name] = sprite;
+                    }
+                    else
+                    {
+                        UnityEngine.Object.Destroy(tex);
+                        SkillsPlugin.Log.LogWarning(
+                            $"Ignored invalid external icon '{path}'.");
                     }
                 }
                 catch (Exception ex)
@@ -1973,6 +3394,130 @@ namespace ErenshorSkills.Items
             }
         }
 
+        /// <summary>
+        /// Make crafted equipment match the stats advertised by its recipe.
+        /// Older registrations could express only one stat, so multi-stat and
+        /// all-stat jewelry frequently produced unrelated attributes.
+        /// </summary>
+        private static void ApplyRecipeStatsToItem(Item item, string itemName)
+        {
+            string description = GetRecipeDescription(itemName);
+            if (item == null || string.IsNullOrEmpty(description))
+                return;
+            item.Lore = description;
+            if (!description.Contains("+")) return;
+
+            string lower = description.ToLowerInvariant();
+            item.Str = item.End = item.Dex = item.Agi = 0;
+            item.Int = item.Wis = item.Cha = 0;
+
+            var allStats = Regex.Match(lower, @"\+(\d+)\s*all\s*stats");
+            if (allStats.Success)
+            {
+                int value = int.Parse(allStats.Groups[1].Value);
+                item.Str = item.End = item.Dex = item.Agi = value;
+                item.Int = item.Wis = item.Cha = value;
+            }
+
+            ParseItemStat(lower, @"str(?:ength)?", ref item.Str);
+            ParseItemStat(lower, @"end(?:urance)?", ref item.End);
+            ParseItemStat(lower, @"dex(?:terity)?", ref item.Dex);
+            ParseItemStat(lower, @"agi(?:lity)?", ref item.Agi);
+            ParseItemStat(lower, @"int(?:elligence)?", ref item.Int);
+            ParseItemStat(lower, @"wis(?:dom)?", ref item.Wis);
+            ParseItemStat(lower, @"cha(?:risma)?", ref item.Cha);
+
+            var allResists = Regex.Match(lower, @"\+(\d+)\s*all\s*resist");
+            if (allResists.Success)
+            {
+                int value = int.Parse(allResists.Groups[1].Value);
+                item.MR = item.ER = item.PR = item.VR = value;
+            }
+            ParseItemResist(lower, "magic", ref item.MR);
+            ParseItemResist(lower, @"(?:fire/cold|fire|cold|elemental)", ref item.ER);
+            ParseItemResist(lower, "poison", ref item.PR);
+            ParseItemResist(lower, "void", ref item.VR);
+
+            ParseItemNumber(lower, @"\+(\d+)\s*ac\b", ref item.AC);
+            ParseItemNumber(lower, @"\+(\d+)\s*hp(?!\s*regen)\b", ref item.HP);
+            ParseItemNumber(lower, @"\+(\d+)\s*(?:mp|mana)(?!\s*regen)\b", ref item.Mana);
+
+            int haste = ParseDescriptionNumber(lower, @"\+(\d+)\s*%?\s*haste");
+            int manaRegen = ParseDescriptionNumber(lower,
+                @"\+(\d+)\s*(?:mp|mana)\s*regen");
+            int healthRegen = ParseDescriptionNumber(lower,
+                @"\+(\d+)\s*hp\s*regen");
+            if (healthRegen == 0 && lower.Contains("hp regen"))
+                healthRegen = 1;
+
+            if (haste > 0 || manaRegen > 0 || healthRegen > 0)
+            {
+                var worn = ScriptableObject.CreateInstance<Spell>();
+                worn.Id = "CS_Worn_" + itemName.Replace(" ", "_");
+                worn.SpellName = itemName + " Worn Effect";
+                worn.SpellDesc = description;
+                worn.Type = Spell.SpellType.Beneficial;
+                worn.Line = Spell.SpellLine.Generic;
+                worn.WornEffect = true;
+                worn.SpellDurationInTicks = 2;
+                worn.Haste = haste;
+                worn.Mana = manaRegen;
+                worn.TargetHealing = healthRegen;
+                worn.MyDamageType = GameData.DamageType.Physical;
+                worn.ChargeVariations = new List<AudioClip>();
+                worn.UsedBy = new List<Class>();
+                item.WornEffect = worn;
+            }
+        }
+
+        private static int ParseDescriptionNumber(string text, string pattern)
+        {
+            var match = Regex.Match(text ?? "", pattern);
+            return match.Success && int.TryParse(match.Groups[1].Value, out int value)
+                ? Mathf.Max(0, value) : 0;
+        }
+
+        private static void ParseItemStat(string text, string pattern, ref int field)
+        {
+            var match = Regex.Match(text, @"\+(\d+)\s*" + pattern + @"\b");
+            if (match.Success)
+                field = Mathf.Max(field, int.Parse(match.Groups[1].Value));
+        }
+
+        private static void ParseItemResist(string text, string pattern, ref int field)
+        {
+            var match = Regex.Match(text, @"\+(\d+)\s*" + pattern + @"\s*resist");
+            if (match.Success)
+                field = Mathf.Max(field, int.Parse(match.Groups[1].Value));
+        }
+
+        private static void ParseItemNumber(string text, string pattern, ref int field)
+        {
+            var match = Regex.Match(text, pattern);
+            if (match.Success)
+                field = Mathf.Max(field, int.Parse(match.Groups[1].Value));
+        }
+
+        private static void ApplyDefaultWeaponStats(Item item, int weaponType)
+        {
+            if (item == null || weaponType <= 0 || item.WeaponDmg > 0) return;
+            int level = Mathf.Max(1, item.ItemLevel);
+            switch (weaponType)
+            {
+                case 1: item.WeaponDmg = 4 + Mathf.RoundToInt(level * 1.10f); item.WeaponDly = 1.4f; break;
+                case 2: item.WeaponDmg = 6 + Mathf.RoundToInt(level * 1.80f); item.WeaponDly = 2.4f; break;
+                case 3: item.WeaponDmg = 3 + Mathf.RoundToInt(level * 0.95f); item.WeaponDly = 1.1f; break;
+                case 4: item.WeaponDmg = 5 + Mathf.RoundToInt(level * 1.45f); item.WeaponDly = 2.2f; break;
+                case 5:
+                    item.WeaponDmg = 4 + Mathf.RoundToInt(level * 1.35f);
+                    item.WeaponDly = 3.8f;
+                    item.IsBow = true;
+                    item.BowRange = 25;
+                    item.BowArrowSpeed = 18f;
+                    break;
+            }
+        }
+
         private static int GetSlotIndex(string slot)
         {
             switch (slot)
@@ -1991,6 +3536,7 @@ namespace ErenshorSkills.Items
                 case "Waist":   return 12;
                 case "Primary": return 13;
                 case "Secondary":return 14;
+                case "PrimaryOrSecondary": return 15;
                 case "Charm":   return 17;
                 default:        return 0; // General
             }
@@ -2014,6 +3560,7 @@ namespace ErenshorSkills.Items
             try
             {
                 ItemFactory.Initialize(__instance);
+                Necromancer.NecromancerCatalog.TryInitialize();
             }
             catch (Exception ex)
             {
@@ -2036,6 +3583,7 @@ namespace ErenshorSkills.Items
             {
                 if (!ItemFactory.Initialized)
                     ItemFactory.Initialize(__instance);
+                Necromancer.NecromancerCatalog.TryInitialize();
             }
             catch { /* DB might not be ready in Awake — that's fine, Start will handle it */ }
         }

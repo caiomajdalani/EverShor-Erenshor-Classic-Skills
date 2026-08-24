@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 
 namespace ErenshorSkills.Skills
@@ -18,7 +19,7 @@ namespace ErenshorSkills.Skills
     ///   Evocation   — +0.08% spell damage per level = +14.4% at 180
     ///   Abjuration  — +0.3% buff duration per level = +54% at 180
     ///   Alteration  — +0.08% heal amount per level  = +14.4% at 180
-    ///   Conjuration — +0.08% DoT/pet damage per level = +14.4% at 180
+    ///   Conjuration — +0.08% DoT/summoned-pet damage per level = +14.4% at 180
     /// </summary>
     public static class MagicSkills
     {
@@ -31,10 +32,33 @@ namespace ErenshorSkills.Skills
             Conjuration   // Pets/DoTs
         }
 
+        /// <summary>
+        /// Intent overrides keyed by Spell.Id. Addon spells whose behaviour is
+        /// implemented in our own runtime carry SpellType.Misc, which the
+        /// switch below would file under Abjuration no matter what they
+        /// actually do. Catalogs register the real school here so those spells
+        /// train and benefit from the right skill.
+        /// </summary>
+        private static readonly System.Collections.Generic.Dictionary<string,
+            MagicSchool> SchoolOverrides =
+            new System.Collections.Generic.Dictionary<string, MagicSchool>(
+                StringComparer.OrdinalIgnoreCase);
+
+        public static void RegisterSchoolOverride(string spellId,
+            MagicSchool school)
+        {
+            if (string.IsNullOrEmpty(spellId) || school == MagicSchool.None)
+                return;
+            SchoolOverrides[spellId] = school;
+        }
+
         /// <summary>Classify a spell into a magic school based on its SpellType.</summary>
         public static MagicSchool ClassifySpell(Spell spell)
         {
             if (spell == null) return MagicSchool.None;
+            if (!string.IsNullOrEmpty(spell.Id) &&
+                SchoolOverrides.TryGetValue(spell.Id, out MagicSchool override_))
+                return override_;
 
             switch (spell.Type)
             {
@@ -107,7 +131,8 @@ namespace ErenshorSkills.Skills
             if (!SkillsPlugin.CfgEnableMagicSkills.Value) return 1f;
             var skill = SkillsSaveManager.Data.Evocation;
             // +0.08% per level = +14.4% at 180
-            return 1f + skill.Level * SkillsPlugin.CfgEvocationDamagePerLevel.Value;
+            return 1f + skill.Level * Mathf.Max(0f,
+                SkillsPlugin.CfgEvocationDamagePerLevel.Value);
         }
 
         /// <summary>Get heal amount multiplier from Alteration skill.</summary>
@@ -117,7 +142,8 @@ namespace ErenshorSkills.Skills
             if (!SkillsPlugin.CfgEnableMagicSkills.Value) return 1f;
             var skill = SkillsSaveManager.Data.Alteration;
             // +0.08% per level = +14.4% at 180
-            return 1f + skill.Level * SkillsPlugin.CfgAlterationHealPerLevel.Value;
+            return 1f + skill.Level * Mathf.Max(0f,
+                SkillsPlugin.CfgAlterationHealPerLevel.Value);
         }
 
         /// <summary>Get buff duration multiplier from Abjuration skill.</summary>
@@ -127,17 +153,53 @@ namespace ErenshorSkills.Skills
             if (!SkillsPlugin.CfgEnableMagicSkills.Value) return 1f;
             var skill = SkillsSaveManager.Data.Abjuration;
             // +0.3% per level = +54% at 180
-            return 1f + skill.Level * SkillsPlugin.CfgAbjurationDurationPerLevel.Value;
+            return 1f + skill.Level * Mathf.Max(0f,
+                SkillsPlugin.CfgAbjurationDurationPerLevel.Value);
         }
 
-        /// <summary>Get DoT/pet damage multiplier from Conjuration skill.</summary>
+        /// <summary>Get the damage multiplier for Conjuration DoTs and summoned pets.</summary>
         public static float GetConjurationMultiplier()
         {
             if (!SkillsSaveManager.HasLoaded) return 1f;
             if (!SkillsPlugin.CfgEnableMagicSkills.Value) return 1f;
             var skill = SkillsSaveManager.Data.Conjuration;
             // +0.08% per level = +14.4% at 180
-            return 1f + skill.Level * SkillsPlugin.CfgConjurationDamagePerLevel.Value;
+            return 1f + skill.Level * Mathf.Max(0f,
+                SkillsPlugin.CfgConjurationDamagePerLevel.Value);
+        }
+
+        /// <summary>
+        /// True only for a native summoned NPC that is still owned by the
+        /// current player. Checking both flags avoids treating ordinary charm,
+        /// SimPlayers, or another caster's summon as the player's pet.
+        /// </summary>
+        public static bool IsPlayerSummonedPet(Character attacker)
+        {
+            try
+            {
+                Character player = GameData.PlayerControl?.Myself;
+                return attacker != null && player != null && attacker != player &&
+                    attacker.isNPC && attacker.Master == player &&
+                    attacker.MyNPC != null && attacker.MyNPC.SummonedByPlayer;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Scale real positive damage while preserving native sentinel values
+        /// such as -1 and zero. Physical, spell, proc, and DoT paths therefore
+        /// use identical rounding.
+        /// </summary>
+        internal static int ScalePositiveDamage(int damage, float multiplier)
+        {
+            if (damage <= 0 || multiplier <= 0f ||
+                float.IsNaN(multiplier) || float.IsInfinity(multiplier))
+                return damage;
+            if (Mathf.Approximately(multiplier, 1f)) return damage;
+            return Mathf.Max(1, Mathf.RoundToInt(damage * multiplier));
         }
     }
 }

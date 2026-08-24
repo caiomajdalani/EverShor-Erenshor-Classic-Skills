@@ -21,22 +21,43 @@ namespace ErenshorSkills.Skills
     /// </summary>
     public static class BeggingSkill
     {
-        private static float _lastBegTime = 0f;
+        private static float _lastBegTime = float.NegativeInfinity;
+        private const float MaxBegRange = 5f;
+
+        internal static void ResetRuntime()
+        {
+            _lastBegTime = float.NegativeInfinity;
+        }
+
+        public static float Cooldown =>
+            SkillsPlugin.CfgTestCooldowns.Value ? 1f : 10f;
+
+        /// <summary>Safe, finite cooldown time remaining for HUD display.</summary>
+        public static float CooldownRemaining
+        {
+            get
+            {
+                if (float.IsNegativeInfinity(_lastBegTime)) return 0f;
+                float remaining = Cooldown - (Time.time - _lastBegTime);
+                if (float.IsNaN(remaining) || float.IsInfinity(remaining))
+                    return 0f;
+                return Mathf.Max(0f, remaining);
+            }
+        }
+
+        public static bool IsReady => CooldownRemaining <= 0f;
 
         public static void TryBeg()
         {
             if (!SkillsPlugin.CfgEnableBegging.Value) return;
 
-            float begCD = SkillsPlugin.CfgTestCooldowns.Value ? 1f : 10f;
-            if (Time.time - _lastBegTime < begCD)
+            if (Time.time - _lastBegTime < Cooldown)
             {
                 ChatHelper.Send(
                     $"<color=#BCAAA4>[Begging]</color> " +
                     $"<color=#AAAAAA>You should wait before begging again...</color>");
                 return;
             }
-            _lastBegTime = Time.time;
-
             // Must have a target (NPC, villager, or SimPlayer)
             string targetName = GetTargetName();
             if (string.IsNullOrEmpty(targetName))
@@ -46,6 +67,24 @@ namespace ErenshorSkills.Skills
                     $"<color=#AAAAAA>You need to target someone to beg from.</color>");
                 return;
             }
+
+            // Begging is a face-to-face interaction, not a zone-wide ability.
+            try
+            {
+                var target = GameData.PlayerControl.CurrentTarget;
+                float distance = Vector3.Distance(
+                    GameData.PlayerControl.transform.position, target.transform.position);
+                if (distance > MaxBegRange)
+                {
+                    ChatHelper.Send(
+                        $"<color=#BCAAA4>[Begging]</color> " +
+                        $"<color=#AAAAAA>{targetName} is too far away to hear you.</color>");
+                    return;
+                }
+            }
+            catch { return; }
+
+            _lastBegTime = Time.time;
 
             var skill = SkillsSaveManager.Data.Begging;
             float difficulty = 1.5f; // Begging is hard (as it should be)
@@ -72,16 +111,32 @@ namespace ErenshorSkills.Skills
                 {
                     // Small item
                     string item = GetBegItem();
-                    ChatHelper.Send(
-                        $"<color=#BCAAA4>[Begging]</color> " +
-                        $"{targetName} sighs and hands you a " +
-                        $"<color=#FFFFFF>{item}</color>.");
+                    if (TryGiveItem(item))
+                    {
+                        ChatHelper.Send(
+                            $"<color=#BCAAA4>[Begging]</color> " +
+                            $"{targetName} sighs and hands you a " +
+                            $"<color=#FFFFFF>{item}</color>.");
+                    }
+                    else
+                    {
+                        ChatHelper.Send(
+                            $"<color=#BCAAA4>[Begging]</color> " +
+                            $"{targetName} offers you a {item}, but your inventory is full.");
+                    }
                 }
                 else
                 {
                     // Gold reward (scaled by level, but always small)
                     int gold = Random.Range(1, Mathf.Max(2, level / 3));
-                    TryAddGold(gold);
+                    if (!TryAddGold(gold))
+                    {
+                        ChatHelper.Send(
+                            $"<color=#BCAAA4>[Begging]</color> " +
+                            $"{targetName} offers you a few coins, but the reward " +
+                            $"could not be saved safely.");
+                        return;
+                    }
 
                     string[] successMsgs = new string[]
                     {
@@ -130,39 +185,84 @@ namespace ErenshorSkills.Skills
                 var target = GameData.PlayerControl.CurrentTarget;
                 if (target == null) return null;
 
-                // Check if it's an NPC via the Character.MyNPC field
-                if (target.MyNPC != null)
-                {
-                    // Accept friendly NPCs and SimPlayers (not hostile mobs)
-                    if (target.MyNPC.NeverAggro)
-                        return target.MyNPC.NPCName;
-                    // SimPlayers also have MyNPC set
-                    if (target.MyNPC.ThisSim != null)
-                        return target.transform.name;
-                }
-
-                // Fallback: check for SimPlayer component
+                // SimPlayers first — they carry MyNPC as well as the component.
+                if (target.MyNPC != null && target.MyNPC.ThisSim != null)
+                    return target.transform.name;
                 var sim = target.GetComponent<SimPlayer>();
                 if (sim != null)
                     return target.MyStats?.MyName ?? target.transform.name;
 
-                // Last resort: any non-hostile character
-                if (target.MyStats != null && !string.IsNullOrEmpty(target.MyStats.MyName))
-                    return target.MyStats.MyName;
+                if (target.MyNPC == null) return null;
+
+                // NeverAggro is a narrow flag that most townsfolk do not set,
+                // so testing it alone rejected nearly every legitimate mark.
+                // Anything that is not actively hostile toward the player is
+                // someone you can beg from.
+                if (target.MyNPC.NeverAggro || target.isVendor)
+                    return target.MyNPC.NPCName ?? target.transform.name;
+
+                var aggressive = target.AggressiveTowards;
+                bool hostile = aggressive != null &&
+                    (aggressive.Contains(Character.Faction.Player) ||
+                     aggressive.Contains(Character.Faction.PC));
+                if (hostile) return null;
+
+                return target.MyNPC.NPCName ?? target.transform.name;
             }
             catch { }
             return null;
         }
 
-        private static void TryAddGold(int amount)
+        private static bool TryAddGold(int amount)
         {
+            Items.BagSystem.MutationSnapshot mutation = null;
             try
             {
-                var stats = GameData.PlayerStats;
-                if (stats != null)
-                    GameData.PlayerInv.Gold += amount;
+                var inventory = GameData.PlayerInv;
+                if (!SkillsSaveManager.HasLoaded || inventory == null || amount <= 0 ||
+                    inventory.Gold < 0 || inventory.Gold > int.MaxValue - amount)
+                    return false;
+
+                mutation = Items.BagSystem.BeginExternalMutation();
+                inventory.Gold += amount;
+                if (Items.BagSystem.CommitExternalMutation("begging-gold", mutation))
+                    return true;
+
+                Items.BagSystem.RollbackExternalMutation(mutation);
             }
-            catch { }
+            catch (System.Exception ex)
+            {
+                if (mutation != null)
+                    Items.BagSystem.RollbackExternalMutation(mutation);
+                SkillsPlugin.Log.LogError($"Begging gold reward rolled back: {ex}");
+            }
+            return false;
+        }
+
+        private static bool TryGiveItem(string itemName)
+        {
+            Items.BagSystem.MutationSnapshot mutation = null;
+            try
+            {
+                if (!SkillsSaveManager.HasLoaded || string.IsNullOrWhiteSpace(itemName))
+                    return false;
+                mutation = Items.BagSystem.BeginExternalMutation();
+                if (!Items.ItemFactory.GiveItemToPlayer(itemName))
+                {
+                    Items.BagSystem.RollbackExternalMutation(mutation);
+                    return false;
+                }
+                if (Items.BagSystem.CommitExternalMutation("begging-item", mutation))
+                    return true;
+                Items.BagSystem.RollbackExternalMutation(mutation);
+            }
+            catch (System.Exception ex)
+            {
+                if (mutation != null)
+                    Items.BagSystem.RollbackExternalMutation(mutation);
+                SkillsPlugin.Log.LogError($"Begging item reward rolled back: {ex}");
+            }
+            return false;
         }
 
         private static string GetBegItem()

@@ -45,7 +45,10 @@ namespace ErenshorSkills.Items
                     item.SpellCastTime = 0.5f; // Quick cast
                     item.Disposable = true;    // Consumed on use
                     spell.SpellIcon = item.ItemIcon;
-                    _buffSpells[item.ItemName] = spell;
+                    string category = ItemFactory.ConsumableBuffs.TryGetValue(
+                        item.ItemName, out var metadata)
+                        ? metadata.category : null;
+                    RegisterBuffTemplate(item.ItemName, spell, category);
                 }
             }
             catch (Exception ex)
@@ -55,10 +58,37 @@ namespace ErenshorSkills.Items
             }
         }
 
+        internal static void RegisterBuffTemplate(string itemName, Spell spell,
+            string category = null)
+        {
+            if (string.IsNullOrWhiteSpace(itemName) || spell == null) return;
+            if (string.IsNullOrEmpty(spell.Id))
+                spell.Id = "CS_Buff_" + itemName.Replace(" ", "_");
+            if (!string.IsNullOrWhiteSpace(category))
+                spell.SpellName = $"{itemName} [CS_{category}]";
+            _buffSpells[itemName] = spell;
+        }
+
+        /// <summary>
+        /// Resolve a deterministic custom buff ID when Erenshor restores saved
+        /// status effects. The persisted duration is supplied by the game.
+        /// </summary>
+        internal static Spell GetBuffSpellById(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return null;
+            foreach (var spell in _buffSpells.Values)
+                if (spell != null && string.Equals(spell.Id, id,
+                    StringComparison.OrdinalIgnoreCase))
+                    return spell;
+            return null;
+        }
+
+        internal static int RegisteredBuffCountForTesting => _buffSpells.Count;
+
         /// <summary>Check if a description contains stat/buff information.</summary>
         private static bool HasStatInfo(string desc)
         {
-            string lower = desc.ToLower();
+            string lower = desc.ToLowerInvariant();
             return lower.Contains("str") || lower.Contains("end") ||
                    lower.Contains("dex") || lower.Contains("agi") ||
                    lower.Contains("int") || lower.Contains("wis") ||
@@ -116,7 +146,7 @@ namespace ErenshorSkills.Items
             spell.MR = 0; spell.ER = 0; spell.PR = 0; spell.VR = 0;
             spell.AC = 0;
 
-            string lower = desc.ToLower();
+            string lower = desc.ToLowerInvariant();
 
             // Parse "all stats" first
             var allMatch = Regex.Match(lower, @"\+(\d+)\s*all\s*stats");
@@ -129,56 +159,76 @@ namespace ErenshorSkills.Items
             }
 
             // Parse individual stats: "+5 Str", "+8 End", etc.
-            ParseAndSetStat(lower, "str", ref spell.Str);
-            ParseAndSetStat(lower, "end", ref spell.End);
-            ParseAndSetStat(lower, "dex", ref spell.Dex);
-            ParseAndSetStat(lower, "agi", ref spell.Agi);
-            ParseAndSetStat(lower, "int", ref spell.Int);
-            ParseAndSetStat(lower, "wis", ref spell.Wis);
-            ParseAndSetStat(lower, "cha", ref spell.Cha);
+            ParseAndSetStat(lower, @"str(?:ength)?", ref spell.Str);
+            ParseAndSetStat(lower, @"end(?:urance)?", ref spell.End);
+            ParseAndSetStat(lower, @"dex(?:terity)?", ref spell.Dex);
+            ParseAndSetStat(lower, @"agi(?:lity)?", ref spell.Agi);
+            ParseAndSetStat(lower, @"int(?:elligence)?", ref spell.Int);
+            ParseAndSetStat(lower, @"wis(?:dom)?", ref spell.Wis);
+            ParseAndSetStat(lower, @"cha(?:risma)?", ref spell.Cha);
 
             // Parse resists: "+8 Fire Resist" etc.
-            ParseResist(lower, "fire", ref spell.ER);
-            ParseResist(lower, "cold", ref spell.ER);
+            ParseResist(lower, "(?:fire/cold|fire|cold|elemental)", ref spell.ER);
             ParseResist(lower, "magic", ref spell.MR);
             ParseResist(lower, "poison", ref spell.PR);
             ParseResist(lower, "void", ref spell.VR);
-            ParseResist(lower, "elemental", ref spell.ER);
 
             // "all resists"
             var allRes = Regex.Match(lower, @"\+(\d+)\s*all\s*resist");
             if (allRes.Success)
             {
                 int val = int.Parse(allRes.Groups[1].Value);
-                spell.MR += val; spell.ER += val;
-                spell.PR += val; spell.VR += val;
+                spell.MR = Mathf.Max(spell.MR, val);
+                spell.ER = Mathf.Max(spell.ER, val);
+                spell.PR = Mathf.Max(spell.PR, val);
+                spell.VR = Mathf.Max(spell.VR, val);
             }
 
-            // Parse HP/Mana regen
-            var hpRegen = Regex.Match(lower, @"\+(\d+)\s*hp\s*regen");
+            // Parse HP/Mana regen. HP regeneration is periodic healing, not
+            // Spell.HP (which changes maximum HP in Erenshor).
+            var hpRegen = Regex.Match(lower,
+                @"\+(\d+)\s*hp(?:\s*/\s*(?:mp|mana))?\s*regen");
             if (hpRegen.Success)
-                spell.HP = int.Parse(hpRegen.Groups[1].Value);
+                spell.TargetHealing = int.Parse(hpRegen.Groups[1].Value);
 
-            var mpRegen = Regex.Match(lower, @"\+(\d+)\s*mp\s*regen");
+            var mpRegen = Regex.Match(lower,
+                @"\+(\d+)\s*(?:hp\s*/\s*)?(?:mp|mana)\s*regen");
             if (mpRegen.Success)
                 spell.Mana = int.Parse(mpRegen.Groups[1].Value);
+
+            if (lower.Contains("restores small hp over time"))
+                spell.TargetHealing = Mathf.Max(1, spell.TargetHealing);
+            if (lower.Contains("restores small mana over time") ||
+                lower.Contains("faster mana regen"))
+                spell.Mana = Mathf.Max(1, spell.Mana);
+
+            var haste = Regex.Match(lower, @"\+(\d+)\s*%?\s*haste");
+            if (haste.Success)
+                spell.Haste = int.Parse(haste.Groups[1].Value);
+
+            if (spell.TargetHealing > 0)
+                spell.MyDamageType = GameData.DamageType.Physical;
 
             // Check we actually set something
             if (spell.Str == 0 && spell.End == 0 && spell.Dex == 0 &&
                 spell.Agi == 0 && spell.Int == 0 && spell.Wis == 0 &&
                 spell.Cha == 0 && spell.HP == 0 && spell.Mana == 0 &&
                 spell.MR == 0 && spell.ER == 0 && spell.PR == 0 &&
-                spell.VR == 0)
+                spell.VR == 0 && spell.TargetHealing == 0 && spell.Haste == 0f)
+            {
+                UnityEngine.Object.Destroy(spell);
                 return null;
+            }
 
             return spell;
         }
 
         /// <summary>Parse "+N stat" from description.</summary>
-        private static void ParseAndSetStat(string lower, string statName, ref int field)
+        private static void ParseAndSetStat(string lower, string statPattern, ref int field)
         {
-            // Match patterns like "+5 str", "+10 Str"
-            var match = Regex.Match(lower, @"\+(\d+)\s*" + statName + @"\b");
+            // Match abbreviations and full names, e.g. "+5 Str" or
+            // "+5 Strength".
+            var match = Regex.Match(lower, @"\+(\d+)\s*" + statPattern + @"\b");
             if (match.Success)
             {
                 int val = int.Parse(match.Groups[1].Value);
@@ -191,16 +241,32 @@ namespace ErenshorSkills.Items
         {
             var match = Regex.Match(lower, @"\+(\d+)\s*" + type + @"\s*resist");
             if (match.Success)
-                field += int.Parse(match.Groups[1].Value);
+                field = Mathf.Max(field, int.Parse(match.Groups[1].Value));
         }
 
         /// <summary>Parse duration in minutes from description. Default 5.</summary>
         private static int ParseDuration(string desc)
         {
-            var match = Regex.Match(desc.ToLower(), @"(\d+)\s*min");
-            if (match.Success)
-                return int.Parse(match.Groups[1].Value);
+            var match = Regex.Match(desc.ToLowerInvariant(), @"(\d+)\s*min");
+            if (match.Success && int.TryParse(match.Groups[1].Value, out int minutes))
+                return Mathf.Clamp(minutes, 1, 1440);
             return 5; // Default 5 minutes
+        }
+    }
+
+    /// <summary>
+    /// SpellDB only knows Resources-backed spells. Resolve our deterministic
+    /// consumable templates so active Food/Drink buffs survive save and reload.
+    /// </summary>
+    [HarmonyLib.HarmonyPatch(typeof(SpellDB), "GetSpellByID")]
+    public static class Patch_GetCustomBuffById
+    {
+        public static void Postfix(ref Spell __result, string _ID)
+        {
+            if (__result != null || string.IsNullOrEmpty(_ID) ||
+                !_ID.StartsWith("CS_Buff_", StringComparison.OrdinalIgnoreCase))
+                return;
+            __result = ConsumableBuffs.GetBuffSpellById(_ID);
         }
     }
 }

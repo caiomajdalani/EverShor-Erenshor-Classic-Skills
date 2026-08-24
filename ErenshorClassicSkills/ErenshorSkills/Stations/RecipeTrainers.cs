@@ -22,6 +22,8 @@ namespace ErenshorSkills.Stations
             = new Dictionary<string, Item>(StringComparer.OrdinalIgnoreCase);
         private static bool _initialized;
 
+        internal static int RecipeScrollCountForTesting => _recipeScrolls.Count;
+
         // Map vendor names/descriptions to tradeskills
         // The game uses transform.name for the vendor identity
         private static readonly Dictionary<string, string[]> VendorTradeskillMap
@@ -50,8 +52,7 @@ namespace ErenshorSkills.Stations
             { "Merchant",  new[] { "Smithing", "Baking", "Brewing", "Fletching", "Jewelcraft", "Tailoring" } },
         };
 
-        // Materials that vendors sell per tradeskill (name -> markup multiplier)
-        // Price = item.ItemValue * multiplier (convenience tax)
+        // Materials that vendors sell per tradeskill.
         private static readonly Dictionary<string, string[]> VendorMaterials
             = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
         {
@@ -108,8 +109,6 @@ namespace ErenshorSkills.Stations
                 "Ethereal Gossamer"
             } },
         };
-        private const int MATERIAL_MARKUP = 5; // Vendors charge 5x the item's base value
-
         // Cached scroll icons per tradeskill
         private static Dictionary<string, Sprite> _scrollIcons
             = new Dictionary<string, Sprite>();
@@ -118,7 +117,8 @@ namespace ErenshorSkills.Stations
         public static void Initialize()
         {
             if (_initialized) return;
-            _initialized = true;
+            _recipeScrolls.Clear();
+            _scrollIcons.Clear();
 
             // Pre-generate one scroll icon per tradeskill
             GenerateScrollIcons();
@@ -158,8 +158,16 @@ namespace ErenshorSkills.Stations
                     scroll.WeaponDmg = 0; scroll.WeaponDly = 0f;
                     scroll.Stackable = false;
                     scroll.NoTradeNoDestroy = false;
+                    // The normal vendor return prevents an economy loop while
+                    // still allowing duplicate or obsolete scroll disposal.
+                    scroll.PlayerCannotSell = false;
                     scroll.ThisWeaponType = (Item.WeaponType)0; // None
                     scroll.Template = false;
+
+                    // Dummy spell so right-click triggers UseConsumable → our prefix intercepts
+                    var dummySpell = ScriptableObject.CreateInstance<Spell>();
+                    dummySpell.SpellName = "Learn " + r.Name;
+                    scroll.ItemEffectOnClick = dummySpell;
 
                     // Null out fields that could cause issues
                     scroll.EquipmentToActivate = null;
@@ -169,8 +177,12 @@ namespace ErenshorSkills.Stations
 
 
                     _recipeScrolls[scrollName] = scroll;
+
+                    // Register with ItemFactory so save/restore system tracks it
+                    Items.ItemFactory.RegisterExternalItem(scrollName, scroll);
                 }
             }
+            _initialized = true;
             SkillsPlugin.Log.LogInfo($"RecipeVendors: Created {_recipeScrolls.Count} recipe scroll items.");
         }
 
@@ -284,13 +296,38 @@ namespace ErenshorSkills.Stations
 
         /// <summary>
         /// Inject recipe scrolls into a vendor's item list.
-        /// Called from Harmony postfix on VendorWindow.LoadWindow.
+        /// Called from the final-priority Harmony prefix on
+        /// VendorWindow.LoadWindow.
         /// </summary>
         public static void InjectRecipesIntoVendor(List<Item> vendorItems, VendorInventory vendor)
         {
             if (!_initialized) Initialize();
             if (vendorItems == null || vendor == null) return;
             if (!SkillsSaveManager.HasLoaded) return;
+            // Class spell merchants are intentionally curated catalogs. The
+            // generic fallback below treats unrecognized vendors as crafting
+            // merchants, which would otherwise append more than a hundred
+            // recipes and materials to curated Necromancer or Monk catalogs.
+            if (vendor.GetComponent<Necromancer.NecromancerVendorMarker>() !=
+                    null ||
+                vendor.GetComponent<Monk.MonkVendorMarker>() != null)
+                return;
+
+            // Native LoadWindow appends unlocked quest rewards after prefixes,
+            // which would otherwise leave those normal stock items behind the
+            // recipe pages. Add them now using the game's own conditions; the
+            // original method then sees them in the list and does not duplicate
+            // them.
+            EnsureUnlockedQuestRewardsPresent(vendorItems, vendor);
+
+            // Vendor inventories persist between opens. Remove scrolls learned
+            // since the last open so stale entries cannot be repurchased.
+            vendorItems.RemoveAll(candidate =>
+            {
+                if (!IsRecipeScroll(candidate)) return false;
+                string learnedName = candidate.ItemName.Substring(8);
+                return SkillsSaveManager.Data.IsRecipeKnown(learnedName);
+            });
 
             // Determine which tradeskills this vendor sells
             string vendorName = vendor.transform.name ?? "";
@@ -357,17 +394,113 @@ namespace ErenshorSkills.Stations
                     }
                     if (matItem != null && !vendorItems.Contains(matItem))
                     {
-                        // Apply markup to the item's value for vendor pricing
-                        matItem.ItemValue = Mathf.Max(matItem.ItemValue, 2) * MATERIAL_MARKUP;
+                        // Do not mutate ItemValue here. Items are shared
+                        // ScriptableObjects; multiplying the value on every vendor
+                        // open inflated both buy and sell prices without bound.
                         vendorItems.Add(matItem);
                         matAdded++;
                     }
                 }
             }
 
+            // Vendor inventories persist between opens, including lists saved
+            // in the old recipes-first order. Stable-partition every open so
+            // native stock, quest rewards, materials, and other mods' normal
+            // merchandise retain their relative order ahead of recipe pages.
+            MoveRecipeScrollsToEnd(vendorItems);
+
             if (added > 0 || matAdded > 0)
                 SkillsPlugin.Log.LogInfo(
                     $"RecipeVendors: Injected {added} scrolls + {matAdded} materials into {vendorName}");
+        }
+
+        private static void EnsureUnlockedQuestRewardsPresent(
+            List<Item> vendorItems, VendorInventory vendor)
+        {
+            if (vendor.QuestRewardsForSale == null) return;
+            Item empty = GameData.PlayerInv?.Empty;
+            foreach (Quest quest in vendor.QuestRewardsForSale)
+            {
+                Item reward = quest?.UnlockItemForVendor;
+                if (quest == null || reward == null || reward == empty ||
+                    !GameData.IsQuestDone(quest.DBName) ||
+                    vendorItems.Contains(reward)) continue;
+                vendorItems.Add(reward);
+            }
+        }
+
+        internal static void MoveRecipeScrollsToEnd(List<Item> vendorItems)
+        {
+            if (vendorItems == null || vendorItems.Count < 2) return;
+
+            var scrolls = new List<Item>();
+            for (int i = 0; i < vendorItems.Count; i++)
+            {
+                Item item = vendorItems[i];
+                if (IsRecipeScroll(item)) scrolls.Add(item);
+            }
+            if (scrolls.Count == 0 || scrolls.Count == vendorItems.Count) return;
+
+            vendorItems.RemoveAll(IsRecipeScroll);
+            vendorItems.AddRange(scrolls);
+        }
+
+        internal static bool ProbeRecipeScrollOrderingForTesting(
+            out string detail)
+        {
+            try
+            {
+                if (!_initialized) Initialize();
+                Item firstScroll = null;
+                Item secondScroll = null;
+                foreach (Item scroll in _recipeScrolls.Values)
+                {
+                    if (firstScroll == null) firstScroll = scroll;
+                    else
+                    {
+                        secondScroll = scroll;
+                        break;
+                    }
+                }
+
+                Item firstStock = null;
+                Item secondStock = null;
+                foreach (Item item in Items.ItemFactory.GetRegisteredItemsForTesting())
+                {
+                    if (item == null || IsRecipeScroll(item)) continue;
+                    if (firstStock == null) firstStock = item;
+                    else if (item != firstStock)
+                    {
+                        secondStock = item;
+                        break;
+                    }
+                }
+
+                if (firstScroll == null || secondScroll == null ||
+                    firstStock == null || secondStock == null)
+                {
+                    detail = "insufficient stock or recipe fixtures";
+                    return false;
+                }
+
+                var mixed = new List<Item>
+                {
+                    firstScroll, firstStock, secondScroll, secondStock
+                };
+                MoveRecipeScrollsToEnd(mixed);
+                bool valid = mixed.Count == 4 &&
+                    mixed[0] == firstStock && mixed[1] == secondStock &&
+                    mixed[2] == firstScroll && mixed[3] == secondScroll;
+                detail = valid
+                    ? "stable stock order followed by stable recipe order"
+                    : "stable recipes-last partition failed";
+                return valid;
+            }
+            catch (Exception ex)
+            {
+                detail = ex.Message;
+                return false;
+            }
         }
 
         /// <summary>
@@ -377,23 +510,121 @@ namespace ErenshorSkills.Stations
         public static bool OnItemPurchased(Item item)
         {
             if (item == null) return false;
-            if (!item.ItemName.StartsWith("Recipe: ")) return false;
+            if (string.IsNullOrEmpty(item.ItemName) ||
+                !item.ItemName.StartsWith("Recipe: ")) return false;
 
             string recipeName = item.ItemName.Substring(8); // Remove "Recipe: " prefix
+            if (SkillsSaveManager.Data.IsRecipeKnown(recipeName))
+            {
+                ChatHelper.Send(
+                    $"<color=#FF6600>[Recipe]</color> You already know: " +
+                    $"<color=#FFFFFF>{recipeName}</color>.");
+                return false; // Don't consume the scroll
+            }
+
             if (SkillsSaveManager.Data.LearnRecipe(recipeName))
             {
-                SkillsSaveManager.SaveRecipesFile();
+                if (!SkillsSaveManager.SaveRecipesFile())
+                {
+                    SkillsSaveManager.Data.KnownRecipes.Remove(recipeName);
+                    ChatHelper.Send(
+                        "<color=#EF5350>[Recipe]</color> The recipe could not be " +
+                        "saved, so the scroll was not consumed.");
+                    return false;
+                }
                 ChatHelper.Send(
                     $"<color=#FFD700>[Recipe]</color> You have learned: " +
                     $"<color=#FFFFFF>{recipeName}</color>!");
+                return true;
             }
-            return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Learn a recipe and consume exactly one scroll as a crash-recoverable
+        /// transaction. The native inventory, bag sidecar, and recipe sidecar
+        /// are committed together, so an interrupted save resolves wholly to
+        /// either the pre-use or post-use state on the next load.
+        /// </summary>
+        public static bool TryConsumeRecipeScroll(ItemIcon slot)
+        {
+            Item item = slot?.MyItem;
+            if (!IsRecipeScroll(item)) return false;
+            if (!Items.BagSystem.IsDirectInventorySlot(slot))
+            {
+                ChatHelper.Send(
+                    "<color=#EF5350>[Recipe]</color> Move the scroll into your " +
+                    "character inventory before learning it.");
+                return false;
+            }
+
+            string recipeName = item.ItemName.Substring(8);
+            if (SkillsSaveManager.Data.IsRecipeKnown(recipeName))
+            {
+                ChatHelper.Send(
+                    $"<color=#FF6600>[Recipe]</color> You already know: " +
+                    $"<color=#FFFFFF>{recipeName}</color>.");
+                return false;
+            }
+
+            var mutation = Items.BagSystem.BeginExternalMutation();
+            string recipesPath = SkillsSaveManager.GetRecipesPath();
+            string recipesBefore = null;
+            bool learned = false;
+            try
+            {
+                recipesBefore = SkillsSaveManager.SerializeRecipesFile();
+                learned = SkillsSaveManager.Data.LearnRecipe(recipeName);
+                if (!learned) return false;
+                string recipesAfter = SkillsSaveManager.SerializeRecipesFile();
+
+                if (item.Stackable && slot.Quantity > 1)
+                    slot.Quantity--;
+                else
+                {
+                    slot.MyItem = GameData.PlayerInv.Empty;
+                    slot.Quantity = 1;
+                }
+                slot.UpdateSlotImage();
+
+                if (!Items.BagSystem.CommitExternalMutation(
+                    "learn-recipe", mutation, recipesPath,
+                    recipesBefore, recipesAfter))
+                    throw new InvalidOperationException(
+                        "The recipe transaction could not be saved.");
+
+                ChatHelper.Send(
+                    $"<color=#FFD700>[Recipe]</color> You have learned: " +
+                    $"<color=#FFFFFF>{recipeName}</color>!");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (learned)
+                    SkillsSaveManager.Data.KnownRecipes.RemoveAll(name =>
+                        string.Equals(name, recipeName,
+                            StringComparison.OrdinalIgnoreCase));
+
+                if (!string.IsNullOrEmpty(recipesBefore) &&
+                    SkillsSaveManager.IsRecipesJsonValid(recipesBefore))
+                    Items.BagSystem.RollbackExternalMutation(
+                        mutation, recipesPath, recipesBefore);
+                else
+                    Items.BagSystem.RollbackExternalMutation(mutation);
+                SkillsPlugin.Log.LogError(
+                    $"Recipe scroll transaction rolled back: {ex}");
+                ChatHelper.Send(
+                    "<color=#EF5350>[Recipe]</color> The recipe could not be " +
+                    "saved, so the scroll was not consumed.");
+                return false;
+            }
         }
 
         /// <summary>Check if an item is a recipe scroll.</summary>
         public static bool IsRecipeScroll(Item item)
         {
-            return item != null && item.ItemName.StartsWith("Recipe: ");
+            return item != null && !string.IsNullOrEmpty(item.ItemName) &&
+                item.ItemName.StartsWith("Recipe: ");
         }
 
         /// <summary>Get a recipe scroll Item by recipe name. Used by the drop system.</summary>
@@ -426,6 +657,7 @@ namespace ErenshorSkills.Stations
     [HarmonyPatch(typeof(VendorWindow), "LoadWindow")]
     public static class Patch_VendorLoadWindow
     {
+        [HarmonyPriority(Priority.Last)]
         public static void Prefix(List<Item> VendorItems, VendorInventory _incoming)
         {
             try
@@ -446,9 +678,64 @@ namespace ErenshorSkills.Stations
     [HarmonyPatch(typeof(VendorWindow), "Transaction")]
     public static class Patch_VendorPurchase
     {
-        public static void Postfix(VendorWindow __instance)
+        public static bool Prefix()
         {
-            // No auto-learn — scrolls remain in inventory until right-clicked
+            try
+            {
+                var slot = GameData.SlotActiveForVendor;
+                if (slot == null || !slot.VendorSlot ||
+                    !Items.ItemFactory.IsCustomItem(slot.MyItem)) return true;
+                int quantity = slot.MyItem.Stackable
+                    ? Mathf.Max(1, slot.Quantity) : 1;
+                if (Items.ItemFactory.CanAddItemToPlayer(slot.MyItem, quantity))
+                    return true;
+                ChatHelper.Send(
+                    "<color=#EF5350>[Vendor]</color> Your inventory is full. " +
+                    "Nothing was purchased and no gold was spent.");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning(
+                    $"Custom vendor purchase preflight failed closed: {ex.Message}");
+                return false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Erenshor's Sell Stack path omits the PlayerCannotSell check used by its
+    /// normal sell button. Enforce it so bags and recipe scrolls cannot bypass
+    /// their protections.
+    /// </summary>
+    [HarmonyPatch(typeof(VendorWindow), "DoSellStack")]
+    public static class Patch_VendorSellStack
+    {
+        public static bool Prefix(VendorWindow __instance)
+        {
+            try
+            {
+                var slot = GameData.SlotActiveForVendor;
+                if (slot == null || slot.VendorSlot || slot.MyItem == null)
+                    return true;
+                if (Items.BagSystem.IsBag(slot.MyItem))
+                {
+                    Items.BagTransferSafety.TryHandleVendorBagSale(
+                        __instance, slot);
+                    return false;
+                }
+                if (!slot.MyItem.PlayerCannotSell &&
+                    !Items.BagSystem.IsBag(slot.MyItem)) return true;
+                ChatHelper.Send(
+                    "<color=#EF5350>[Vendor]</color> That item cannot be sold.");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning(
+                    $"Protected-item sale check failed closed: {ex.Message}");
+                return false;
+            }
         }
     }
 }

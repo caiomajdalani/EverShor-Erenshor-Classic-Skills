@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using BepInEx.Configuration;
+using ErenshorSkills.Monk;
 using HarmonyLib;
 using UnityEngine;
 
@@ -93,8 +94,15 @@ namespace ErenshorSkills.Patches
     [HarmonyPatch(typeof(PlayerCombat), "PerformAttacks")]
     public static class Patch_PerformAttacks
     {
+        [ThreadStatic] internal static bool HandwrapAnimationEligible;
+        [ThreadStatic] internal static bool HandwrapAnimationHandled;
+
+        [HarmonyPrefix, HarmonyPriority(Priority.Last)]
         public static bool Prefix(PlayerCombat __instance, Character target, int attackCount, bool isMainHand)
         {
+            HandwrapAnimationEligible = false;
+            HandwrapAnimationHandled = false;
+
             // --- Attack Sync: skip if disabled or ranged ---
             var myStats = SyncReflection.GetPlayerStats(__instance);
             var myAnim = SyncReflection.GetPlayerAnim(__instance);
@@ -107,21 +115,46 @@ namespace ErenshorSkills.Patches
             // Wands and bows use their own code path — let vanilla handle them
             if (isWand || isBow) return true;
 
-            if (!AttackSyncConfig.SyncPlayerAttacks.Value) return true;
+            bool useHandwrapAnimation =
+                MonkRuntime.UsesHandwrapAutoAnimation(isMainHand);
+            // Handwraps always need the replacement path so Erenshor never
+            // layers its invisible one-handed weapon swing over the authored
+            // punches. Attack synchronization remains optional for every
+            // other weapon.
+            if (!AttackSyncConfig.SyncPlayerAttacks.Value &&
+                !useHandwrapAnimation)
+                return true;
             if (target == null || !target.Alive) return true;
 
             bool inRange = SyncReflection.CallCheckForRange(__instance, isWand, isBow, target);
+            // Preserve vanilla's HandleInvalidTarget feedback and delay reset.
+            if (!inRange) return true;
+            HandwrapAnimationEligible = useHandwrapAnimation;
+            if (useHandwrapAnimation)
+            {
+                MonkRuntime.PlayHandwrapAutoAnimation(isMainHand);
+                HandwrapAnimationHandled = true;
+            }
 
             for (int i = 0; i <= attackCount; i++)
             {
-                if (!inRange) continue;
                 target.FlagForFactionHit(true);
 
-                // Fire animation triggers immediately
-                if (i == 0) myAnim.SetTrigger(isMainHand ? "MeleeSwing" : "DualWield");
-                if (i == 1 && isMainHand) myAnim.SetBool("DoubleAttack", true);
-                if (i == 1 && !isMainHand) myAnim.SetBool("OHDoubleAttack", true);
-                if (i == 2) myAnim.SetTrigger("MeleeSwing");
+                // Invisible Monk handwraps use the authored punch driver.
+                // Do not start Erenshor's generic one-handed animation first:
+                // even a same-frame trigger reset can leave its double-attack
+                // state layered under the punch.
+                if (!useHandwrapAnimation)
+                {
+                    if (i == 0)
+                        myAnim.SetTrigger(isMainHand
+                            ? "MeleeSwing" : "DualWield");
+                    if (i == 1 && isMainHand)
+                        myAnim.SetBool("DoubleAttack", true);
+                    if (i == 1 && !isMainHand)
+                        myAnim.SetBool("OHDoubleAttack", true);
+                    if (i == 2) myAnim.SetTrigger("MeleeSwing");
+                }
 
                 int dmg = myStats.CalcMeleeDamage(
                     isMainHand ? myStats.MyInv.MHDmg : myStats.MyInv.OHDmg,
@@ -129,61 +162,37 @@ namespace ErenshorSkills.Patches
 
                 string avoidance = SyncReflection.CallCheckTargetInnateAvoidance(__instance, target);
 
-                if (i == 0 && isMainHand && myStats.CombatStance != null && myStats.CombatStance.SelfDamagePerAttack > 0f)
-                {
-                    float pct = myStats.CombatStance.SelfDamagePerAttack / 100f;
-                    myStats.Myself.SelfDamageMeFlat(Mathf.RoundToInt((float)myStats.CurrentMaxHP * pct));
-                }
-
-                myStats.CheckProc(isMainHand ? GameData.PlayerInv.MH : GameData.PlayerInv.OH, target);
-                if (dmg > 0) myStats.RecentDmg = 240f;
-                if (myStats.CombatStance != null && myStats.CombatStance.SelfDamagePerAttack > 0f)
-                    myStats.Myself.SelfDamageMe(myStats.CombatStance.SelfDamagePerAttack);
-
-                // --- MERGED: Award weapon skill XP ---
-                try
-                {
-                    if (SkillsPlugin.CfgEnableCombatSkills.Value)
-                    {
-                        string weaponName = "";
-                        bool isTwoHand = GameData.PlayerInv?.TwoHandPrimary ?? false;
-                        int slot = isMainHand ? 12 : 13;
-                        var eq = GameData.PlayerInv;
-                        if (eq?.EquippedItems != null && eq.EquippedItems.Count > slot && eq.EquippedItems[slot] != null)
-                            weaponName = eq.EquippedItems[slot].ItemName ?? "";
-
-                        if (string.IsNullOrEmpty(weaponName) || weaponName == "Empty")
-                        {
-                            var hth = SkillsSaveManager.Data.HandToHand;
-                            hth.TimesUsed++; hth.Successes++;
-                            SkillXpEngine.AwardXp(hth, 2f, showChat: false);
-                        }
-                        else
-                        {
-                            var wtype = Skills.CombatSkills.ClassifyWeapon(weaponName, isTwoHand);
-                            if (wtype != Skills.CombatSkills.WeaponType.Unknown &&
-                                wtype != Skills.CombatSkills.WeaponType.Wands)
-                                Skills.CombatSkills.OnWeaponHit(weaponName, isTwoHand, 0);
-                        }
-                    }
-                }
-                catch { }
+                // July 2026 added Opportunist to the vanilla melee path. Preserve it
+                // when this prefix replaces PlayerCombat.PerformAttacks.
+                if (string.IsNullOrEmpty(avoidance) &&
+                    SyncReflection.TryTriggerOpportunist(__instance, myStats, target))
+                    continue;
 
                 // Start two-phase coroutine for synced hit
                 var hitData = new DelayedPlayerHitData
                 {
                     Instance = __instance, Target = target, Dmg = dmg,
                     IsMainHand = isMainHand, MyStats = myStats, MyControl = myControl,
-                    Avoidance = avoidance, Anim = myAnim
+                    Avoidance = avoidance, Anim = myAnim,
+                    ProcSlot = isMainHand ? GameData.PlayerInv.MH : GameData.PlayerInv.OH,
+                    ApplyInitialStanceDamage = i == 0 && isMainHand
                 };
                 SkillsPlugin.Instance.StartCoroutine(TwoPhasePlayerHit(hitData));
             }
 
-            // Reset attack delay
-            if (isMainHand) myStats.ResetMHAtkDelay();
-            else myStats.ResetOHAtkDelay();
+            // Reset attack delay through reflection. Erenshor build 24247002
+            // changed the CLR signature from Reset*AtkDelay() to
+            // Reset*AtkDelay(bool, float), despite retaining optional C# args.
+            // A direct call compiled against either version fails on the other.
+            SyncReflection.ResetAttackDelay(myStats, isMainHand);
 
             return false; // Skip original
+        }
+
+        internal static void ResetHandwrapAnimationContext()
+        {
+            HandwrapAnimationEligible = false;
+            HandwrapAnimationHandled = false;
         }
 
         private static IEnumerator TwoPhasePlayerHit(DelayedPlayerHitData data)
@@ -210,6 +219,11 @@ namespace ErenshorSkills.Patches
             if (data.Target == null || !data.Target.Alive || data.MyStats == null)
                 yield break;
 
+            // Swing audio occurs at impact time for both hits and misses.
+            if (data.MyStats.Myself?.MyAttackSound != null)
+                data.MyStats.Myself.MyAudio.PlayOneShot(data.MyStats.Myself.MyAttackSound,
+                    data.MyStats.Myself.MyAudio.volume * GameData.SFXVol * GameData.MasterVol);
+
             if (data.Avoidance != "")
             {
                 UpdateSocialLog.CombatLogAdd(new ChatLogLine(
@@ -218,11 +232,28 @@ namespace ErenshorSkills.Patches
                 yield break;
             }
 
-            if (data.MyStats.Myself?.MyAttackSound != null)
-                data.MyStats.Myself.MyAudio.PlayOneShot(data.MyStats.Myself.MyAttackSound,
-                    data.MyStats.Myself.MyAudio.volume * GameData.SFXVol * GameData.MasterVol);
+            try
+            {
+                var stance = data.MyStats.CombatStance;
+                if (data.ApplyInitialStanceDamage && stance != null &&
+                    stance.SelfDamagePerAttack > 0f)
+                {
+                    float pct = stance.SelfDamagePerAttack / 100f;
+                    data.MyStats.Myself.SelfDamageMeFlat(
+                        Mathf.RoundToInt(data.MyStats.CurrentMaxHP * pct));
+                }
 
-            SyncReflection.CallHandleDamageResult(data.Instance, data.Target, ref data.Dmg, data.IsMainHand);
+                data.MyStats.CheckProc(data.ProcSlot, data.Target);
+                SyncReflection.CallHandleDamageResult(data.Instance, data.Target,
+                    ref data.Dmg, data.IsMainHand);
+                if (data.Dmg > 0) data.MyStats.RecentDmg = 240f;
+                if (stance != null && stance.SelfDamagePerAttack > 0f)
+                    data.MyStats.Myself.SelfDamageMe(stance.SelfDamagePerAttack);
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogError($"Delayed player hit failed: {ex}");
+            }
         }
     }
 
@@ -231,6 +262,100 @@ namespace ErenshorSkills.Patches
         public PlayerCombat Instance; public Character Target; public int Dmg;
         public bool IsMainHand; public Stats MyStats; public PlayerControl MyControl;
         public string Avoidance; public Animator Anim;
+        public ItemIcon ProcSlot; public bool ApplyInitialStanceDamage;
+    }
+
+    /// <summary>
+    /// Weapon proficiency is independent of the optional animation sync. A
+    /// postfix observes every vanilla or replaced melee attempt, so disabling
+    /// SyncPlayerAttacks no longer disables melee skill progression.
+    /// </summary>
+    [HarmonyPatch(typeof(PlayerCombat), "PerformAttacks")]
+    public static class Patch_MeleeXP
+    {
+        public struct AttackState
+        {
+            public bool XpEligible;
+            public bool PreviousContextActive;
+            public bool PreviousMainHand;
+        }
+
+        [ThreadStatic] internal static bool ContextActive;
+        [ThreadStatic] internal static bool CurrentIsMainHand;
+
+        [HarmonyPrefix, HarmonyPriority(Priority.First)]
+        public static void Prefix(PlayerCombat __instance, Character target,
+            bool isMainHand, out AttackState __state)
+        {
+            __state = new AttackState
+            {
+                PreviousContextActive = ContextActive,
+                PreviousMainHand = CurrentIsMainHand
+            };
+            ContextActive = true;
+            CurrentIsMainHand = isMainHand;
+            if (!SkillsSaveManager.HasLoaded ||
+                !SkillsPlugin.CfgEnableCombatSkills.Value ||
+                target == null || !target.Alive) return;
+            try
+            {
+                var slot = isMainHand ? GameData.PlayerInv?.MH : GameData.PlayerInv?.OH;
+                var weapon = slot?.MyItem;
+                if (weapon != null && (weapon.IsBow || weapon.IsWand)) return;
+                __state.XpEligible = SyncReflection.CallCheckForRange(
+                    __instance, false, false, target);
+            }
+            catch { __state.XpEligible = false; }
+        }
+
+        public static void Postfix(Character target, int attackCount,
+            bool isMainHand, AttackState __state)
+        {
+            try
+            {
+                if (!__state.XpEligible) return;
+                var slot = isMainHand ? GameData.PlayerInv?.MH : GameData.PlayerInv?.OH;
+                var weapon = slot?.MyItem;
+                if (weapon != null && (weapon.IsBow || weapon.IsWand)) return;
+                int attempts = Mathf.Max(1, attackCount + 1);
+                for (int i = 0; i < attempts; i++)
+                {
+                    if (weapon == null || weapon == GameData.PlayerInv?.Empty ||
+                        string.IsNullOrEmpty(weapon.ItemName) || weapon.ItemName == "Empty")
+                    {
+                        var skill = SkillsSaveManager.Data.HandToHand;
+                        skill.TimesUsed++;
+                        skill.Successes++;
+                        SkillXpEngine.AwardXp(skill, 2f, showChat: false);
+                    }
+                    else
+                    {
+                        Skills.CombatSkills.OnWeaponHit(weapon,
+                            isMainHand && (GameData.PlayerInv?.TwoHandPrimary ?? false), 0f);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning($"Melee skill XP failed: {ex.Message}");
+            }
+            finally
+            {
+                RestoreContext(__state);
+            }
+        }
+
+        public static Exception Finalizer(Exception __exception, AttackState __state)
+        {
+            RestoreContext(__state);
+            return __exception;
+        }
+
+        private static void RestoreContext(AttackState state)
+        {
+            ContextActive = state.PreviousContextActive;
+            CurrentIsMainHand = state.PreviousMainHand;
+        }
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -242,7 +367,8 @@ namespace ErenshorSkills.Patches
     {
         public static void Postfix(PlayerCombat __instance, Character _target)
         {
-            if (!SkillsPlugin.CfgEnableCombatSkills.Value) return;
+            if (!SkillsSaveManager.HasLoaded ||
+                !SkillsPlugin.CfgEnableCombatSkills.Value || _target == null) return;
             try
             {
                 var skill = SkillsSaveManager.Data.Wands;
@@ -254,20 +380,21 @@ namespace ErenshorSkills.Patches
     }
 
     // ══════════════════════════════════════════════════════════════
-    // ARCHERY XP — Postfix on PerformAttacks for bow attacks only
-    // (The Prefix above returns true for bows, so vanilla runs,
-    //  and this postfix fires after)
+    // ARCHERY XP — observe the exact vanilla projectile path. This fires only
+    // after range/facing validation and once per arrow actually launched.
     // ══════════════════════════════════════════════════════════════
 
-    [HarmonyPatch(typeof(PlayerCombat), "PerformAttacks")]
+    [HarmonyPatch(typeof(PlayerCombat), "DoBowAttack",
+        new Type[] { typeof(Character), typeof(int) })]
     public static class Patch_ArcheryXP
     {
-        public static void Postfix(PlayerCombat __instance, Character target, int attackCount, bool isMainHand)
+        public static void Postfix(Character _target)
         {
-            if (!SkillsPlugin.CfgEnableCombatSkills.Value) return;
+            if (!SkillsSaveManager.HasLoaded ||
+                !SkillsPlugin.CfgEnableCombatSkills.Value) return;
             try
             {
-                if (target == null) return;
+                if (_target == null) return;
                 var mhItem = GameData.PlayerInv?.MH?.MyItem;
                 if (mhItem == null || !mhItem.IsBow) return;
 
@@ -286,10 +413,17 @@ namespace ErenshorSkills.Patches
     [HarmonyPatch(typeof(NPC), "PerformMeleeHit")]
     public static class Patch_NPCMeleeSync
     {
-        internal static bool SuppressNPCAttackSound = false;
-
-        public static void Prefix(NPC __instance, int baseDamage, bool isOffhand)
+        public struct SoundState
         {
+            public Character Character;
+            public AudioClip Clip;
+        }
+
+        [HarmonyPrefix, HarmonyPriority(Priority.First)]
+        public static void Prefix(NPC __instance, int baseDamage, bool isOffhand,
+            out SoundState __state)
+        {
+            __state = new SoundState();
             bool isSim = __instance.SimPlayer;
             if (isSim && !AttackSyncConfig.SyncSimPlayerAttacks.Value) return;
             if (!isSim && !AttackSyncConfig.SyncNPCAttacks.Value) return;
@@ -297,8 +431,12 @@ namespace ErenshorSkills.Patches
 
             Character myself = __instance.GetChar();
             if (myself == null || __instance.CurrentAggroTarget == null) return;
-
-            SuppressNPCAttackSound = true;
+            if (myself.MyAttackSound != null)
+            {
+                __state.Character = myself;
+                __state.Clip = myself.MyAttackSound;
+                myself.MyAttackSound = null;
+            }
 
             float fraction = isSim
                 ? AttackSyncConfig.PlayerHitFraction.Value
@@ -314,7 +452,21 @@ namespace ErenshorSkills.Patches
             SkillsPlugin.Instance.StartCoroutine(TwoPhaseNPCSound(__instance, anim, fraction, animSpeed));
         }
 
-        public static void Postfix() { SuppressNPCAttackSound = false; }
+        [HarmonyPostfix, HarmonyPriority(Priority.Last)]
+        public static void Postfix(SoundState __state) => RestoreSound(__state);
+
+        [HarmonyFinalizer]
+        public static Exception Finalizer(Exception __exception, SoundState __state)
+        {
+            RestoreSound(__state);
+            return __exception;
+        }
+
+        private static void RestoreSound(SoundState state)
+        {
+            if (state.Character != null && state.Clip != null)
+                state.Character.MyAttackSound = state.Clip;
+        }
 
         private static IEnumerator TwoPhaseNPCSound(NPC npc, Animator anim, float fraction, float animSpeed)
         {
@@ -338,43 +490,12 @@ namespace ErenshorSkills.Patches
             myself = npc.GetChar();
             if (myself == null || myself.MyAttackSound == null) yield break;
 
+            if (GameData.PlayerControl == null) yield break;
             float dist = Vector3.Distance(myself.transform.position, GameData.PlayerControl.transform.position);
             bool isTargetPlayer = npc.CurrentAggroTarget == GameData.PlayerControl.Myself;
             if (dist < 8f || isTargetPlayer)
                 myself.MyAudio.PlayOneShot(myself.MyAttackSound,
                     myself.MyAudio.volume * GameData.CombatVol * GameData.MasterVol);
-        }
-    }
-
-    [HarmonyPatch(typeof(NPC), "PerformMeleeHit")]
-    [HarmonyPriority(Priority.HigherThanNormal)]
-    public static class Patch_NPCMeleeSoundSuppressor
-    {
-        private static AudioClip _savedClip;
-        private static Character _savedChar;
-
-        [HarmonyPrefix, HarmonyPriority(Priority.First)]
-        public static void MuteSound(NPC __instance)
-        {
-            _savedClip = null; _savedChar = null;
-            if (!Patch_NPCMeleeSync.SuppressNPCAttackSound) return;
-            Character myself = __instance.GetChar();
-            if (myself?.MyAttackSound != null)
-            {
-                _savedChar = myself;
-                _savedClip = myself.MyAttackSound;
-                myself.MyAttackSound = null;
-            }
-        }
-
-        [HarmonyPostfix, HarmonyPriority(Priority.First)]
-        public static void RestoreSound()
-        {
-            if (_savedChar != null && _savedClip != null)
-            {
-                _savedChar.MyAttackSound = _savedClip;
-                _savedChar = null; _savedClip = null;
-            }
         }
     }
 
@@ -387,6 +508,9 @@ namespace ErenshorSkills.Patches
         private static FieldInfo _pcMyStats, _pcMyAnim, _pcMyControl;
         private static MethodInfo _pcCheckForWand, _pcCheckForBow, _pcCheckForRange;
         private static MethodInfo _pcCheckTargetInnateAvoidance, _pcHandleDamageResult;
+        private static MethodInfo _pcCheckIfBehind;
+        private static MethodInfo _statsResetMHAtkDelay, _statsResetOHAtkDelay;
+        private static FieldInfo _miscOpportunist, _miscBackstab;
         private static FieldInfo _statsCurrentMHAtkDelay;
         private static FieldInfo _npcMHBow, _npcMHWand;
         private static bool _npcFieldsResolved;
@@ -403,12 +527,94 @@ namespace ErenshorSkills.Patches
             _pcCheckForRange = pcType.GetMethod("CheckForRange", flags);
             _pcCheckTargetInnateAvoidance = pcType.GetMethod("CheckTargetInnateAvoidance", flags);
             _pcHandleDamageResult = pcType.GetMethod("HandleDamageResult", flags);
+            _pcCheckIfBehind = pcType.GetMethod("CheckIfBehind", flags);
             _statsCurrentMHAtkDelay = typeof(Stats).GetField("CurrentMHAtkDelay", flags);
+            _statsResetMHAtkDelay = FindDelayReset("ResetMHAtkDelay", flags);
+            _statsResetOHAtkDelay = FindDelayReset("ResetOHAtkDelay", flags);
+            _miscOpportunist = typeof(Misc).GetField("Opportunist", flags);
+            _miscBackstab = typeof(Misc).GetField("Backstab", flags);
         }
 
         public static Stats GetPlayerStats(PlayerCombat pc) => _pcMyStats?.GetValue(pc) as Stats;
-        public static Animator GetPlayerAnim(PlayerCombat pc) => _pcMyAnim?.GetValue(pc) as Animator;
+        public static Animator GetPlayerAnim(PlayerCombat pc)
+        {
+            // Pre-Planar-March builds cached a private PlayerCombat.MyAnim field.
+            var anim = _pcMyAnim?.GetValue(pc) as Animator;
+            if (anim != null) return anim;
+
+            // Build 24247002 removed that field and routes animation through the
+            // Character component instead.
+            try
+            {
+                var character = pc?.GetComponent<Character>();
+                anim = character?.GetMyAnim();
+                if (anim != null) return anim;
+                return pc?.GetComponent<Animator>();
+            }
+            catch { return null; }
+        }
         public static PlayerControl GetPlayerControl(PlayerCombat pc) => _pcMyControl?.GetValue(pc) as PlayerControl;
+
+        private static MethodInfo FindDelayReset(string name, BindingFlags flags)
+        {
+            MethodInfo fallback = null;
+            foreach (var method in typeof(Stats).GetMethods(flags))
+            {
+                if (method.Name != name) continue;
+                int count = method.GetParameters().Length;
+                if (count == 0) return method;
+                if (count == 2) fallback = method;
+                else if (fallback == null) fallback = method;
+            }
+            return fallback;
+        }
+
+        public static void ResetAttackDelay(Stats stats, bool mainHand)
+        {
+            if (stats == null) return;
+            var method = mainHand ? _statsResetMHAtkDelay : _statsResetOHAtkDelay;
+            if (method == null) return;
+
+            try
+            {
+                int count = method.GetParameters().Length;
+                if (count == 0)
+                    method.Invoke(stats, null);
+                else if (count == 2)
+                    method.Invoke(stats, new object[] { false, 0f });
+                else
+                    method.Invoke(stats, new object[] { 0f });
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning($"Attack delay reset failed: {ex.Message}");
+            }
+        }
+
+        public static bool TryTriggerOpportunist(PlayerCombat pc, Stats stats, Character target)
+        {
+            try
+            {
+                if (_miscOpportunist == null || _miscBackstab == null ||
+                    _pcCheckIfBehind == null ||
+                    stats?.Myself?.MySkills == null || target == null)
+                    return false;
+
+                var opportunist = _miscOpportunist.GetValue(GameData.Misc) as Skill;
+                var backstab = _miscBackstab.GetValue(GameData.Misc) as Skill;
+                if (opportunist == null || backstab == null ||
+                    !stats.Myself.MySkills.KnownSkills.Contains(opportunist))
+                    return false;
+                if (UnityEngine.Random.Range(0, 100) >= 2)
+                    return false;
+                if (!((bool)(_pcCheckIfBehind.Invoke(pc, new object[] { target }) ?? false)))
+                    return false;
+
+                stats.Myself.MySkills.DoSkill(backstab, target);
+                return true;
+            }
+            catch { return false; }
+        }
 
         public static float GetCurrentMHAtkDelay(Stats stats)
         {

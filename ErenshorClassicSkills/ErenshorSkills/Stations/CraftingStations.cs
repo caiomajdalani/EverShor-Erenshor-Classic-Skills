@@ -37,6 +37,8 @@ namespace ErenshorSkills.Stations
     /// </summary>
     public static class CraftingStations
     {
+        internal static int StationMappingCountForTesting => StationMap.Count;
+        internal static int StationPlacementCountForTesting => StationPlacements.Length;
         // Station type → tradeskill name mapping
         private static readonly Dictionary<string, string> StationMap
             = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -72,7 +74,9 @@ namespace ErenshorSkills.Stations
 
         // Spawned station GameObjects we've placed in the world
         private static List<GameObject> _spawnedStations = new List<GameObject>();
-        private static string _lastScene = "";
+        private static List<StationInteractor> _taggedStations =
+            new List<StationInteractor>();
+        private const float InteractionRange = 5f;
 
         // ═════════════════════════════════════════════════════════════
         // Station definitions per zone
@@ -133,7 +137,7 @@ namespace ErenshorSkills.Stations
         {
             // Clean up old stations
             DespawnAll();
-            _lastScene = sceneName;
+            _taggedStations.RemoveAll(interactor => interactor == null);
 
             foreach (var spawn in StationPlacements)
             {
@@ -200,6 +204,7 @@ namespace ErenshorSkills.Stations
                             var interactor = obj.AddComponent<StationInteractor>();
                             interactor.StationName = rule.Station;
                             interactor.TradeskillName = rule.Skill;
+                            _taggedStations.Add(interactor);
                             tagged++;
                             break;
                         }
@@ -224,10 +229,23 @@ namespace ErenshorSkills.Stations
             // Try to load a 3D model for this station type
             string modelName = GetModelName(spawn.Tradeskill);
             string modelsDir = System.IO.Path.Combine(
-                System.IO.Path.GetDirectoryName(SkillsPlugin.Instance.Info.Location),
-                "ClassicSkills", "Models");
+                RuntimePaths.AssetDirectory, "Models");
             string objPath = System.IO.Path.Combine(modelsDir, modelName + ".obj");
             string texPath = System.IO.Path.Combine(modelsDir, modelName + ".png");
+
+            // Try embedded resources first if disk files don't exist
+            if (!System.IO.File.Exists(objPath))
+            {
+                string embeddedObj = EmbeddedResources.ExtractModelFile(modelName + ".obj");
+                if (embeddedObj != null) objPath = embeddedObj;
+                string embeddedMtl = EmbeddedResources.ExtractModelFile(modelName + ".mtl");
+                // mtl is auto-discovered by ObjLoader
+            }
+            if (!System.IO.File.Exists(texPath))
+            {
+                string embeddedTex = EmbeddedResources.ExtractModelFile(modelName + ".png");
+                if (embeddedTex != null) texPath = embeddedTex;
+            }
 
             GameObject station = null;
             if (System.IO.File.Exists(objPath))
@@ -244,7 +262,9 @@ namespace ErenshorSkills.Stations
                 {
                     Material mat = new Material(Shader.Find("Standard"));
                     mat.color = GetStationColor(spawn.Tradeskill);
-                    renderer.material = mat;
+                    renderer.sharedMaterial = mat;
+                    var assets = station.AddComponent<RuntimeGeneratedAssets>();
+                    assets.Track(mat);
                 }
             }
 
@@ -350,7 +370,9 @@ namespace ErenshorSkills.Stations
                     Color beamColor = new Color(0.5f, 0.9f, 1f, 0.3f); // Soft cyan
                     mat.SetColor("_Color", beamColor);
                     mat.SetFloat("_Mode", 1f); // Additive
-                    lr.material = mat;
+                    lr.sharedMaterial = mat;
+                    var assets = beamGO.AddComponent<RuntimeGeneratedAssets>();
+                    assets.Track(mat);
                     lr.startColor = new Color(0.5f, 0.9f, 1f, 0.5f);
                     lr.endColor = new Color(0.5f, 0.9f, 1f, 0.0f);
                 }
@@ -412,6 +434,14 @@ namespace ErenshorSkills.Stations
             _spawnedStations.Clear();
         }
 
+        public static void Shutdown()
+        {
+            DespawnAll();
+            foreach (var interactor in _taggedStations)
+                if (interactor != null) GameObject.Destroy(interactor);
+            _taggedStations.Clear();
+        }
+
         private static string GetModelName(string tradeskill)
         {
             switch (tradeskill)
@@ -465,6 +495,18 @@ namespace ErenshorSkills.Stations
         public static bool TryInteractWithStation(GameObject target)
         {
             if (target == null) return false;
+
+            bool isKnownStation = target.GetComponent<StationInteractor>() != null ||
+                StationMap.ContainsKey(target.name);
+            if (!isKnownStation) return false;
+            var player = GameData.PlayerControl;
+            if (player == null || Vector3.Distance(
+                player.transform.position, target.transform.position) > InteractionRange)
+            {
+                ChatHelper.Send(
+                    "<color=#EF5350>[Tradeskills]</color> You are too far away from that station.");
+                return true;
+            }
 
             // Only interact with objects that have our StationInteractor component
             var interactor = target.GetComponent<StationInteractor>();
@@ -524,11 +566,7 @@ namespace ErenshorSkills.Stations
 
         private void OnMouseDown()
         {
-            // Player left-clicked this station
-            UI.TradeskillWindow.Open(TradeskillName);
-            ChatHelper.Send(
-                $"<color=#FF9800>[{TradeskillName}]</color> " +
-                $"You open the {StationName}.");
+            CraftingStations.TryInteractWithStation(gameObject);
         }
 
         private void OnMouseEnter()
@@ -601,27 +639,6 @@ namespace ErenshorSkills.Stations
             {
                 SkillsPlugin.Log.LogError($"Forge hook error: {ex.Message}");
             }
-        }
-    }
-
-    /// <summary>
-    /// Hook into the player's general interaction system (left-click on
-    /// world objects) to detect clicks on our custom crafting stations.
-    /// This catches clicks on both our spawned stations AND any existing
-    /// game objects that match crafting station names.
-    /// </summary>
-    /// <summary>
-    /// Patch_PlayerInteract removed — was causing false positives by raycasting
-    /// on every left-click and matching random objects. Stations are interacted
-    /// with via OnMouseDown on the StationInteractor component instead.
-    /// </summary>
-    [HarmonyPatch(typeof(PlayerControl), "LeftClick")]
-    public static class Patch_PlayerInteract
-    {
-        public static void Postfix(PlayerControl __instance)
-        {
-            // Intentionally empty — station interaction handled by
-            // StationInteractor.OnMouseDown and Patch_OpenForge
         }
     }
 

@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using BepInEx;
 using UnityEngine;
 
@@ -37,7 +38,10 @@ namespace ErenshorSkills
                 int playerLevel = 1;
                 try { playerLevel = Mathf.Max(1, GameData.PlayerStats?.Level ?? 1); }
                 catch { }
-                return (playerLevel * 5) + 5;
+                int configuredMax = 180;
+                try { configuredMax = Mathf.Max(1, SkillsPlugin.CfgGlobalMaxLevel?.Value ?? 180); }
+                catch { }
+                return Mathf.Min((playerLevel * 5) + 5, configuredMax);
             }
         }
 
@@ -84,10 +88,16 @@ namespace ErenshorSkills
         // Custom items in inventory that need to be re-injected on load
         public List<SavedCustomItem> CustomInventory = new List<SavedCustomItem>();
 
+        // The native AuraItem field can be resolved before addon items have
+        // registered during character selection. Keep the last deliberately
+        // equipped Monk/Necromancer aura ID in the character sidecar so a
+        // failed native lookup cannot turn a logout into permanent item loss.
+        public string EquippedClassAuraId = "";
+
         /// <summary>Recipe names the player has learned. Recipes not in this list are locked.</summary>
         public List<string> KnownRecipes = new List<string>();
 
-        /// <summary>Default starter recipes every character begins with (2 per tradeskill).</summary>
+        /// <summary>Default starter recipes every character begins with.</summary>
         public static readonly string[] StarterRecipes = new string[]
         {
             // Smithing
@@ -109,7 +119,8 @@ namespace ErenshorSkills
         {
             foreach (var name in StarterRecipes)
             {
-                if (!KnownRecipes.Contains(name))
+                if (!KnownRecipes.Exists(r => string.Equals(r, name,
+                    StringComparison.OrdinalIgnoreCase)))
                     KnownRecipes.Add(name);
             }
         }
@@ -117,13 +128,15 @@ namespace ErenshorSkills
         /// <summary>Check if a recipe is known (learnable system).</summary>
         public bool IsRecipeKnown(string recipeName)
         {
-            return KnownRecipes.Contains(recipeName);
+            return !string.IsNullOrWhiteSpace(recipeName) &&
+                KnownRecipes.Exists(r => string.Equals(r, recipeName,
+                    StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>Learn a new recipe. Returns true if it was new.</summary>
         public bool LearnRecipe(string recipeName)
         {
-            if (KnownRecipes.Contains(recipeName)) return false;
+            if (string.IsNullOrWhiteSpace(recipeName) || IsRecipeKnown(recipeName)) return false;
             KnownRecipes.Add(recipeName);
             return true;
         }
@@ -218,8 +231,7 @@ namespace ErenshorSkills
 
             SkillsPlugin.Log.LogInfo(
                 $"SpendTP: {skill.Name} {oldLevel}->{skill.Level}, " +
-                $"TP={TrainingPoints}, Spent={TrainingPointsSpent}, " +
-                $"Ref={skill.GetHashCode()}, Fishing.Lv={Fishing.Level}");
+                $"TP={TrainingPoints}, Spent={TrainingPointsSpent}");
             return true;
         }
 
@@ -228,11 +240,12 @@ namespace ErenshorSkills
         /// </summary>
         public SkillEntry FindSkillByName(string partialName)
         {
-            string lower = partialName.ToLower();
+            if (string.IsNullOrWhiteSpace(partialName)) return null;
+            string lower = partialName.ToLowerInvariant();
             var all = GetAll();
             foreach (var s in all)
             {
-                if (s.Name.ToLower().Contains(lower))
+                if ((s.Name ?? "").ToLowerInvariant().Contains(lower))
                     return s;
             }
             return null;
@@ -286,6 +299,170 @@ namespace ErenshorSkills
             list.AddRange(GetMagicSkills());
             return list;
         }
+
+        /// <summary>
+        /// Apply catch-up skill levels for pre-existing characters.
+        /// Called on first load when no save file exists.
+        /// Uses the same (level * 5) + 5 formula as the skill cap,
+        /// scaled by class affinity so a Druid gets higher magic/heal
+        /// skills and a Duelist gets higher combat skills.
+        /// </summary>
+        public void ApplyCatchUpLevels(int playerLevel, string className)
+        {
+            if (playerLevel <= 1) return; // Level 1 characters don't need catch-up
+
+            int configuredMax = Mathf.Max(1, SkillsPlugin.CfgGlobalMaxLevel?.Value ?? 180);
+            int skillCap = Mathf.Min((playerLevel * 5) + 5, configuredMax);
+            // Catch-up gives 70% of cap — the player still has room to grow
+            int baseLevel = UnityEngine.Mathf.Clamp(
+                UnityEngine.Mathf.RoundToInt(skillCap * 0.7f), 1, configuredMax);
+
+            bool doCombatMagic = SkillsPlugin.CfgCatchUpCombatMagic.Value;
+            bool doUtilityTrade = SkillsPlugin.CfgCatchUpUtilityTrade.Value;
+
+            if (!doCombatMagic && !doUtilityTrade) return;
+
+            int totalSet = 0;
+
+            if (doCombatMagic)
+            {
+                // Combat skills — scale by class melee affinity
+                float meleeScale = GetClassMeleeScale(className);
+                int meleeLevel = UnityEngine.Mathf.RoundToInt(baseLevel * meleeScale);
+                if (meleeLevel > 0)
+                {
+                    foreach (var s in GetCombatSkills())
+                    {
+                        if (s.Level < meleeLevel)
+                        {
+                            s.Level = meleeLevel;
+                            s.CurrentXp = 0;
+                            totalSet++;
+                        }
+                    }
+                }
+
+                // Magic skills — scale by class magic affinity
+                float magicScale = GetClassMagicScale(className);
+                int magicLevel = UnityEngine.Mathf.RoundToInt(baseLevel * magicScale);
+                if (magicLevel > 0)
+                {
+                    foreach (var s in GetMagicSkills())
+                    {
+                        if (s.Level < magicLevel)
+                        {
+                            s.Level = magicLevel;
+                            s.CurrentXp = 0;
+                            totalSet++;
+                        }
+                    }
+                }
+            }
+
+            if (doUtilityTrade)
+            {
+                // Utility skills — flat 50% of base, all classes benefit equally
+                int utilLevel = UnityEngine.Mathf.RoundToInt(baseLevel * 0.5f);
+                if (utilLevel > 0)
+                {
+                    foreach (var s in GetUtilitySkills())
+                    {
+                        if (s.Level < utilLevel)
+                        {
+                            s.Level = utilLevel;
+                            s.CurrentXp = 0;
+                            totalSet++;
+                        }
+                    }
+                }
+
+                // Tradeskills — class specialization gets a big head start,
+                // other tradeskills get a smaller base level.
+                // Specialist formula: (level * 5) + 5 (same as skill cap), capped at 130
+                // Non-specialist: 30% of base level
+                string specialTrade = GetClassTradeskill(className);
+                int specialLevel = UnityEngine.Mathf.Clamp(playerLevel * 5 + 5, 1,
+                    Mathf.Min(130, configuredMax));
+                int genericLevel = UnityEngine.Mathf.RoundToInt(baseLevel * 0.3f);
+
+                foreach (var s in GetTradeskills())
+                {
+                    int targetLevel = (s.Name == specialTrade) ? specialLevel : genericLevel;
+                    if (targetLevel > 0 && s.Level < targetLevel)
+                    {
+                        s.Level = targetLevel;
+                        s.CurrentXp = 0;
+                        totalSet++;
+                    }
+                }
+            }
+
+            if (totalSet > 0)
+            {
+                SkillsPlugin.Log.LogInfo(
+                    $"CatchUp: Set {totalSet} skills for level {playerLevel} {className} " +
+                    $"(base={baseLevel}, cap={skillCap})");
+                string specialNote = doUtilityTrade
+                    ? $" {className} specialty: {GetClassTradeskill(className)}."
+                    : "";
+                ChatHelper.Send(
+                    $"<color=#FFD700>[Classic Skills]</color> " +
+                    $"<color=#AAAAAA>Catch-up applied: {totalSet} skills set based on " +
+                    $"your level {playerLevel} {className}.{specialNote}</color>");
+            }
+        }
+
+        // Class affinity scales for catch-up (same values as SimPlayerSkills)
+        private static float GetClassMeleeScale(string className)
+        {
+            switch (className)
+            {
+                case "Duelist":     return 1.0f;
+                case "Paladin":     return 0.85f;
+                case "Reaver":      return 0.9f;
+                case "Druid":       return 0.5f;
+                case "Stormcaller": return 0.25f;
+                case "Arcanist":    return 0.25f;
+                default:            return 0.5f;
+            }
+        }
+
+        /// <summary>
+        /// Each class specializes in one tradeskill:
+        ///   Paladin    → Smithing    (heavy armor, weapons)
+        ///   Duelist    → Fletching   (bows, arrows, light weapons)
+        ///   Reaver     → Brewing     (dark potions, poisons)
+        ///   Druid      → Baking      (herbs, nature cooking)
+        ///   Arcanist   → Jewelcraft  (enchanted gems, arcane foci)
+        ///   Stormcaller→ Tailoring   (cloth armor, magical robes)
+        /// </summary>
+        private static string GetClassTradeskill(string className)
+        {
+            switch (className)
+            {
+                case "Paladin":     return "Smithing";
+                case "Duelist":     return "Fletching";
+                case "Reaver":      return "Brewing";
+                case "Druid":       return "Baking";
+                case "Arcanist":    return "Jewelcraft";
+                case "Stormcaller": return "Tailoring";
+                default:            return "Smithing";
+            }
+        }
+
+        private static float GetClassMagicScale(string className)
+        {
+            switch (className)
+            {
+                case "Arcanist":    return 1.0f;
+                case "Stormcaller": return 1.0f;
+                case "Druid":       return 0.85f;
+                case "Reaver":      return 0.6f;
+                case "Paladin":     return 0.4f;
+                case "Duelist":     return 0.0f;
+                default:            return 0.3f;
+            }
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -298,11 +475,20 @@ namespace ErenshorSkills
         /// Award XP to a skill and handle level-ups.
         /// Returns true if a level-up occurred.
         /// </summary>
-        public static bool AwardXp(SkillEntry skill, float xp, bool showChat = true)
+        public static bool AwardXp(SkillEntry skill, float xp, bool showChat = true,
+            bool requestSave = true)
         {
+            if (skill == null || float.IsNaN(xp) || float.IsInfinity(xp) || xp <= 0f)
+                return false;
             // Skills at level 0 are untrained — no XP gain
             if (!skill.IsUnlocked) return false;
-            if (skill.IsAtCap) return false;
+            if (skill.IsAtCap)
+            {
+                // Callers record usage/success counters before awarding XP.
+                // Those counters still need a debounced save at the skill cap.
+                if (requestSave) SkillsSaveManager.RequestSave();
+                return false;
+            }
 
             bool leveled = false;
 
@@ -342,14 +528,14 @@ namespace ErenshorSkills
             if (skill.IsAtCap)
                 skill.CurrentXp = 0f;
 
-            if (leveled && SkillsPlugin.CfgShowChatMessages.Value)
+            if (leveled && showChat && SkillsPlugin.CfgShowChatMessages.Value)
             {
                 ChatHelper.Send(
-                    $"<color=#FFD700>*** {skill.Name.ToUpper()} SKILL UP! ***</color> " +
+                    $"<color=#FFD700>*** {skill.Name.ToUpperInvariant()} SKILL UP! ***</color> " +
                     $"<color=#7EC8E3>Level {skill.Level}/{skill.SkillCap}</color>");
             }
 
-            SkillsSaveManager.Save();
+            if (requestSave) SkillsSaveManager.RequestSave();
             return leveled;
         }
 
@@ -360,6 +546,8 @@ namespace ErenshorSkills
         /// </summary>
         public static bool AwardTradeskillXp(SkillEntry skill, float xp, int trivialLevel)
         {
+            if (skill == null || float.IsNaN(xp) || float.IsInfinity(xp) ||
+                xp <= 0f || trivialLevel <= 0) return false;
             if (!skill.IsUnlocked) return false;
             if (skill.IsAtCap) return false;
             if (skill.Level >= trivialLevel) return false; // Trivial — no gains
@@ -401,11 +589,11 @@ namespace ErenshorSkills
             if (leveled && SkillsPlugin.CfgShowChatMessages.Value)
             {
                 ChatHelper.Send(
-                    $"<color=#FFD700>*** {skill.Name.ToUpper()} SKILL UP! ***</color> " +
+                    $"<color=#FFD700>*** {skill.Name.ToUpperInvariant()} SKILL UP! ***</color> " +
                     $"<color=#7EC8E3>Level {skill.Level}/{skill.SkillCap}</color>");
             }
 
-            SkillsSaveManager.Save();
+            SkillsSaveManager.RequestSave();
             return leveled;
         }
 
@@ -414,8 +602,12 @@ namespace ErenshorSkills
         /// Optionally award XP on both success and failure (EQ style).
         /// </summary>
         public static bool SkillCheck(SkillEntry skill, float difficulty = 1f,
-            float xpOnSuccess = 10f, float xpOnFailure = 3f)
+            float xpOnSuccess = 10f, float xpOnFailure = 3f,
+            bool requestSave = true)
         {
+            if (skill == null) return false;
+            if (float.IsNaN(difficulty) || float.IsInfinity(difficulty) ||
+                difficulty <= 0f) difficulty = 1f;
             skill.TimesUsed++;
 
             // Success chance: 30% base + 1.2% per level, modified by difficulty
@@ -427,15 +619,17 @@ namespace ErenshorSkills
             if (success)
             {
                 skill.Successes++;
-                AwardXp(skill, xpOnSuccess);
+                AwardXp(skill, xpOnSuccess, requestSave: false);
             }
             else
             {
                 skill.Failures++;
                 // EQ awarded skillups on failure too - smaller XP
-                AwardXp(skill, xpOnFailure, showChat: false);
+                AwardXp(skill, xpOnFailure, showChat: false,
+                    requestSave: false);
             }
 
+            if (requestSave) SkillsSaveManager.RequestSave();
             return success;
         }
     }
@@ -446,8 +640,19 @@ namespace ErenshorSkills
 
     public static class ChatHelper
     {
+        private static void MirrorTestMessage(string channel, string message)
+        {
+            if (SkillsPlugin.CfgEnableTestMode?.Value != true) return;
+            string plain = Regex.Replace(message ?? "", "<[^>]+>", "");
+            SkillsPlugin.Log.LogInfo($"[Test {channel}] {plain}");
+        }
+
         public static void Send(string message)
         {
+            // Test-mode chat is mirrored to BepInEx so automated in-game runs
+            // retain durable evidence even when the player's chat filters hide
+            // SystemMessages. Normal gameplay logging remains unchanged.
+            MirrorTestMessage("Chat", message);
             try
             {
                 // Use UpdateSocialLog.LogAdd — same approach as ErenshorQoL mod
@@ -456,6 +661,25 @@ namespace ErenshorSkills
             catch
             {
                 SkillsPlugin.Log.LogInfo($"[Chat] {message}");
+            }
+        }
+
+        /// <summary>
+        /// Sends gameplay feedback as a spell-result line so Erenshor routes it
+        /// to combat-log tabs instead of the general/system-message channel.
+        /// </summary>
+        public static void SendCombat(string message,
+            string color = "lightblue")
+        {
+            MirrorTestMessage("Combat", message);
+            try
+            {
+                UpdateSocialLog.CombatLogAdd(new ChatLogLine(message,
+                    ChatLogLine.LogType.PlayerSpellResults, color));
+            }
+            catch
+            {
+                SkillsPlugin.Log.LogInfo($"[Combat] {message}");
             }
         }
     }
@@ -468,8 +692,13 @@ namespace ErenshorSkills
     {
         private static AllSkillsData _data;
         private static string _charName = "";
+        private static bool _saveDirty;
+        private static float _lastSaveTime = -10f;
+        private const float SaveDebounceSeconds = 5f;
+        private const int InventorySidecarFormatVersion = 2;
         public static string CharName => _charName;
         public static string Sanitize(string name) => SanitizeName(name);
+        internal static int LoadedInventoryFormatVersion { get; private set; }
 
         public static AllSkillsData Data
         {
@@ -484,19 +713,28 @@ namespace ErenshorSkills
         {
             _charName = SanitizeName(characterName);
             _data = new AllSkillsData();
+            _saveDirty = false;
+            _lastSaveTime = -10f;
+            LoadedInventoryFormatVersion = 0;
             string path = GetPath();
+            bool primaryHealthy = true;
 
-            if (File.Exists(path))
+            if (File.Exists(path) || File.Exists(path + ".bak"))
             {
                 try
                 {
-                    string json = File.ReadAllText(path);
+                    if (!SafeFileIO.TryReadAllTextWithBackup(path, IsSkillsJsonValid,
+                        out string json, out bool recovered, out string readError))
+                        throw new InvalidDataException(readError);
                     if (!string.IsNullOrEmpty(json) && json.Trim() != "{}")
                     {
                         ParseSkillsJson(json);
+                        ValidateLoadedData();
                         SkillsPlugin.Log.LogInfo(
                             $"Loaded skill data for '{characterName}' " +
                             $"(Foraging Lv{_data.Foraging.Level})");
+                        if (recovered)
+                            SkillsPlugin.Log.LogWarning($"Recovered '{characterName}' skills from the verified backup.");
                     }
                     else
                     {
@@ -507,6 +745,7 @@ namespace ErenshorSkills
                 catch (Exception ex)
                 {
                     SkillsPlugin.Log.LogError($"Failed to load skills: {ex.Message}");
+                    primaryHealthy = false;
                 }
             }
             else
@@ -519,12 +758,37 @@ namespace ErenshorSkills
             // Available = (PlayerLevel * 3) - PointsSpent
             // No migration needed — CheckForNewTrainingPoints() handles it.
 
+            // Recover an interrupted item transaction before loading any
+            // sidecar it may have changed (bags, player recipes, sim recipes,
+            // or bank data). Loading first would leave memory stale even after
+            // the recovery repaired the file on disk.
+            bool transactionHealthy = Items.BagSystem.RecoverPendingTransaction(
+                GetBagsPath());
+
             // Load custom inventory, recipes, and bags from separate files
-            LoadInventoryFile();
-            LoadRecipesFile();
-            LoadBagsFile();
+            bool inventoryHealthy = transactionHealthy && LoadInventoryFile();
+            bool recipesHealthy = transactionHealthy && LoadRecipesFile();
+            bool bagsHealthy = transactionHealthy && LoadBagsFile();
+            bool simRecipesHealthy = transactionHealthy &&
+                Skills.SimPlayerTradeskills.LoadSimRecipes();
+
+            if (!primaryHealthy || !transactionHealthy || !inventoryHealthy ||
+                !recipesHealthy || !bagsHealthy ||
+                !simRecipesHealthy)
+            {
+                HasLoaded = false;
+                SkillsPlugin.Log.LogError(
+                    $"Classic Skills disabled for '{characterName}' because one or more " +
+                    "save files and their backups could not be validated. Existing files " +
+                    "will not be overwritten.");
+                ChatHelper.Send(
+                    "<color=#EF5350>[Classic Skills]</color> Save data could not be " +
+                    "validated. The addon is disabled for this session to protect your items.");
+                return;
+            }
 
             HasLoaded = true;
+            Items.BagSystem.ReconcileInventoryBagIds();
         }
 
         /// <summary>Parse our manual JSON format into AllSkillsData.</summary>
@@ -534,6 +798,8 @@ namespace ErenshorSkills
             _data.TrainingPoints = ParseTopLevelInt(json, "__TrainingPoints", 0);
             _data.TrainingPointsSpent = ParseTopLevelInt(json, "__TrainingPointsSpent", 0);
             _data.LastKnownPlayerLevel = ParseTopLevelInt(json, "__LastKnownPlayerLevel", 0);
+            _data.EquippedClassAuraId = ParseTopLevelString(json,
+                "__EquippedClassAuraId", string.Empty);
 
             var all = _data.GetAll();
             SkillsPlugin.Log.LogInfo($"ParseSkillsJson: parsing {all.Count} skills, TP={_data.TrainingPoints}, Spent={_data.TrainingPointsSpent}");
@@ -553,57 +819,141 @@ namespace ErenshorSkills
                 skill.TimesUsed = ParseInt(block, "TimesUsed", skill.TimesUsed);
                 skill.Successes = ParseInt(block, "Successes", skill.Successes);
                 skill.Failures = ParseInt(block, "Failures", skill.Failures);
-
-                if (skill.Name == "Fishing")
-                    SkillsPlugin.Log.LogInfo($"ParseSkillsJson: Fishing parsed -> Level={skill.Level}, Ref={skill.GetHashCode()}, _data.Fishing.Lv={_data.Fishing.Level}, SameRef={skill == _data.Fishing}");
             }
         }
 
-        private static void LoadInventoryFile()
+        private static bool IsSkillsJsonValid(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return false;
+            string trimmed = json.Trim();
+            if (!trimmed.StartsWith("{") || !trimmed.EndsWith("}")) return false;
+            if (!TryReadRequiredInt(trimmed, "__TrainingPoints", out _) ||
+                !TryReadRequiredInt(trimmed, "__TrainingPointsSpent", out _) ||
+                !TryReadRequiredInt(trimmed, "__LastKnownPlayerLevel", out _))
+                return false;
+            const string number = "-?(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:[eE][+-]?\\d+)?";
+            foreach (var skill in new AllSkillsData().GetAll())
+            {
+                string name = Regex.Escape(skill.Name);
+                string pattern = $"\\\"{name}\\\"\\s*:\\s*\\{{" +
+                    $"\\s*\\\"Level\\\"\\s*:\\s*(?<level>-?\\d+)\\s*," +
+                    $"\\s*\\\"CurrentXp\\\"\\s*:\\s*(?<xp>{number})\\s*," +
+                    $"\\s*\\\"TimesUsed\\\"\\s*:\\s*(?<used>-?\\d+)\\s*," +
+                    $"\\s*\\\"Successes\\\"\\s*:\\s*(?<success>-?\\d+)\\s*," +
+                    $"\\s*\\\"Failures\\\"\\s*:\\s*(?<failure>-?\\d+)\\s*\\}}";
+                var matches = Regex.Matches(trimmed, pattern);
+                if (matches.Count != 1) return false;
+                Match match = matches[0];
+                if (!int.TryParse(match.Groups["level"].Value, out _) ||
+                    !int.TryParse(match.Groups["used"].Value, out _) ||
+                    !int.TryParse(match.Groups["success"].Value, out _) ||
+                    !int.TryParse(match.Groups["failure"].Value, out _) ||
+                    !float.TryParse(match.Groups["xp"].Value,
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out float xp) || float.IsNaN(xp) || float.IsInfinity(xp))
+                    return false;
+            }
+            return true;
+        }
+
+        private static bool TryReadRequiredInt(string json, string key, out int value)
+        {
+            value = 0;
+            var matches = Regex.Matches(json,
+                $"\\\"{Regex.Escape(key)}\\\"\\s*:\\s*(-?\\d+)");
+            return matches.Count == 1 && int.TryParse(
+                matches[0].Groups[1].Value, out value);
+        }
+
+        private static string ParseTopLevelString(string json, string key,
+            string fallback)
+        {
+            var matches = Regex.Matches(json,
+                $"\\\"{Regex.Escape(key)}\\\"\\s*:\\s*" +
+                "(\\\"(?:\\\\.|[^\\\"\\\\])*\\\")");
+            if (matches.Count != 1 || !SafeFileIO.TryDecodeJsonStringToken(
+                    matches[0].Groups[1].Value, out string value))
+                return fallback;
+            return value;
+        }
+
+        private static void ValidateLoadedData()
+        {
+            int maxLevel = Mathf.Max(1, SkillsPlugin.CfgGlobalMaxLevel?.Value ?? 180);
+            _data.TrainingPoints = Mathf.Max(0, _data.TrainingPoints);
+            _data.TrainingPointsSpent = Mathf.Max(0, _data.TrainingPointsSpent);
+            _data.LastKnownPlayerLevel = Mathf.Max(0, _data.LastKnownPlayerLevel);
+            if (!Patches.ClassAuraPersistence.IsClassAuraId(
+                    _data.EquippedClassAuraId))
+                _data.EquippedClassAuraId = string.Empty;
+            foreach (var skill in _data.GetAll())
+            {
+                skill.Level = Mathf.Clamp(skill.Level, 0, maxLevel);
+                if (float.IsNaN(skill.CurrentXp) || float.IsInfinity(skill.CurrentXp) || skill.CurrentXp < 0f)
+                    skill.CurrentXp = 0f;
+                skill.TimesUsed = Mathf.Max(0, skill.TimesUsed);
+                skill.Successes = Mathf.Max(0, skill.Successes);
+                skill.Failures = Mathf.Max(0, skill.Failures);
+            }
+        }
+
+        private static bool LoadInventoryFile()
         {
             try
             {
                 string path = GetInventoryPath();
-                if (!File.Exists(path)) return;
-                string json = File.ReadAllText(path);
-                if (string.IsNullOrEmpty(json) || json.Trim() == "{}") return;
+                if (!File.Exists(path) && !File.Exists(path + ".bak")) return true;
+                if (!SafeFileIO.TryReadAllTextWithBackup(path,
+                    IsInventoryJsonValid,
+                    out string json, out bool recovered, out string readError))
+                    throw new InvalidDataException(readError);
+                LoadedInventoryFormatVersion = 1;
+                if (string.IsNullOrEmpty(json) || json.Trim() == "{}") return true;
 
                 _data.CustomInventory.Clear();
-                // Parse "ItemName": count pairs
-                string content = json.Trim().TrimStart('{').TrimEnd('}');
-                string[] pairs = content.Split(',');
-                foreach (var pair in pairs)
+                var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (Match match in Regex.Matches(json,
+                    "(\\\"(?:\\\\.|[^\\\"\\\\])*\\\")\\s*:\\s*(\\d+)"))
                 {
-                    string trimmed = pair.Trim();
-                    if (string.IsNullOrEmpty(trimmed)) continue;
-                    int colonIdx = trimmed.LastIndexOf(':');
-                    if (colonIdx < 0) continue;
-                    string name = trimmed.Substring(0, colonIdx).Trim().Trim('"');
-                    string countStr = trimmed.Substring(colonIdx + 1).Trim();
-                    if (int.TryParse(countStr, out int count) && count > 0)
+                    if (!SafeFileIO.TryDecodeJsonStringToken(
+                        match.Groups[1].Value, out string name) ||
+                        string.IsNullOrWhiteSpace(name) || !names.Add(name))
+                        throw new InvalidDataException(
+                            "Custom inventory contains an invalid or duplicate item name.");
+                    if (!int.TryParse(match.Groups[2].Value, out int count))
+                        throw new InvalidDataException(
+                            "Custom inventory contains an invalid item count.");
+                    if (string.Equals(name, "__InventoryFormat",
+                        StringComparison.Ordinal))
+                    {
+                        if (count < 1 || count > InventorySidecarFormatVersion)
+                            throw new InvalidDataException(
+                                $"Unsupported custom inventory format {count}.");
+                        LoadedInventoryFormatVersion = count;
+                        continue;
+                    }
+                    if (count > 0)
                         _data.CustomInventory.Add(new SavedCustomItem { Name = name, Count = count });
                 }
 
                 if (_data.CustomInventory.Count > 0)
                     SkillsPlugin.Log.LogInfo(
                         $"Loaded {_data.CustomInventory.Count} custom item types from inventory file.");
+                if (recovered)
+                    SkillsPlugin.Log.LogWarning("Recovered custom inventory tracking from backup.");
+                return true;
             }
             catch (Exception ex)
             {
                 SkillsPlugin.Log.LogWarning($"LoadInventoryFile error: {ex.Message}");
+                return false;
             }
         }
 
         private static int ParseTopLevelInt(string json, string key, int fallback)
         {
-            string search = $"\"{key}\": ";
-            int idx = json.IndexOf(search);
-            if (idx < 0) return fallback;
-            int start = idx + search.Length;
-            int end = json.IndexOfAny(new[] { ',', '}', '\n' }, start);
-            if (end < 0) end = json.Length;
-            string val = json.Substring(start, end - start).Trim();
-            return int.TryParse(val, out int result) ? result : fallback;
+            return TryReadRequiredInt(json, key, out int result) ? result : fallback;
         }
 
         private static int ParseInt(string block, string key, int fallback)
@@ -640,13 +990,40 @@ namespace ErenshorSkills
             HasLoaded = false;
             _charName = "";
             _data = new AllSkillsData();
+            _saveDirty = false;
+            _lastSaveTime = -10f;
+            LoadedInventoryFormatVersion = 0;
+            Skills.ForagingSkill.ResetRuntime();
+            Skills.BindWoundSkill.ResetRuntime();
+            Skills.BeggingSkill.ResetRuntime();
+            Skills.MeditateSkill.ResetRuntime();
+            Skills.SwimmingSkill.ResetRuntime();
             Items.BagSystem.Reset();
         }
 
-        public static void Save()
+        /// <summary>
+        /// Coalesce high-frequency skill XP updates. Combat can generate many
+        /// hits per second; writing four sidecars on every hit caused stutter
+        /// and widened the chance of an interrupted save.
+        /// </summary>
+        public static void RequestSave()
         {
-            if (string.IsNullOrEmpty(_charName)) return;
-            if (!HasLoaded) return;
+            if (!HasLoaded || string.IsNullOrEmpty(_charName)) return;
+            _saveDirty = true;
+            if (Time.unscaledTime - _lastSaveTime >= SaveDebounceSeconds)
+                Save();
+        }
+
+        public static void FlushIfDue()
+        {
+            if (_saveDirty && HasLoaded &&
+                Time.unscaledTime - _lastSaveTime >= SaveDebounceSeconds)
+                Save();
+        }
+
+        public static bool Save()
+        {
+            if (string.IsNullOrEmpty(_charName) || !HasLoaded) return false;
 
             // Verify the character name matches the current player
             // to prevent saving one character's data under another's name
@@ -658,16 +1035,13 @@ namespace ErenshorSkills
                 {
                     SkillsPlugin.Log.LogWarning(
                         $"Save aborted: _charName='{_charName}' but current player is '{currentName}'");
-                    return;
+                    _saveDirty = true;
+                    return false;
                 }
             }
             catch { }
             try
             {
-                string dir = Path.GetDirectoryName(GetPath());
-                if (!Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
                 // Manual JSON — JsonUtility silently fails on our data structure
                 var sb = new System.Text.StringBuilder();
                 sb.AppendLine("{");
@@ -676,14 +1050,17 @@ namespace ErenshorSkills
                 sb.AppendLine($"  \"__TrainingPoints\": {_data.TrainingPoints},");
                 sb.AppendLine($"  \"__TrainingPointsSpent\": {_data.TrainingPointsSpent},");
                 sb.AppendLine($"  \"__LastKnownPlayerLevel\": {_data.LastKnownPlayerLevel},");
+                sb.AppendLine($"  \"__EquippedClassAuraId\": \"" +
+                    SafeFileIO.EscapeJson(_data.EquippedClassAuraId ?? "") +
+                    "\",");
 
                 var skills = _data.GetAll();
                 for (int i = 0; i < skills.Count; i++)
                 {
                     var s = skills[i];
-                    sb.Append($"  \"{s.Name}\": {{" +
+                    sb.Append($"  \"{SafeFileIO.EscapeJson(s.Name)}\": {{" +
                         $"\"Level\":{s.Level}," +
-                        $"\"CurrentXp\":{s.CurrentXp:F2}," +
+                        $"\"CurrentXp\":{s.CurrentXp.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}," +
                         $"\"TimesUsed\":{s.TimesUsed}," +
                         $"\"Successes\":{s.Successes}," +
                         $"\"Failures\":{s.Failures}}}");
@@ -693,159 +1070,286 @@ namespace ErenshorSkills
                 sb.AppendLine("}");
 
                 string json = sb.ToString();
-                File.WriteAllText(GetPath(), json);
+                if (!SafeFileIO.TryWriteAllTextAtomic(GetPath(), json, out string mainError))
+                    throw new IOException(mainError);
 
                 // Save custom inventory to separate file
-                SaveInventoryFile();
-                SaveRecipesFile();
-                SaveBagsFile();
+                bool inventorySaved = SaveInventoryFile();
+                bool recipesSaved = SaveRecipesFile();
+                bool bagsSaved = SaveBagsFile();
+                if (!inventorySaved || !recipesSaved || !bagsSaved)
+                    throw new IOException("One or more Classic Skills sidecars could not be saved.");
 
                 SkillsPlugin.Log.LogInfo(
                     $"Saved skills for '{_charName}' ({json.Length} chars)");
+                _saveDirty = false;
+                _lastSaveTime = Time.unscaledTime;
+                return true;
             }
             catch (Exception ex)
             {
+                _saveDirty = true;
                 SkillsPlugin.Log.LogError($"Failed to save skills: {ex.Message}\n{ex.StackTrace}");
+                return false;
             }
         }
 
-        private static void SaveInventoryFile()
+        private static bool SaveInventoryFile()
         {
             try
             {
-                var items = _data.CustomInventory;
-                if (items == null) return;
+                if (_data.CustomInventory == null) return true;
+                var items = new List<SavedCustomItem>(_data.CustomInventory);
+                items.Sort((left, right) => string.Compare(left?.Name,
+                    right?.Name, StringComparison.OrdinalIgnoreCase));
                 string path = GetInventoryPath();
                 var sb = new System.Text.StringBuilder();
+                var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 sb.AppendLine("{");
+                sb.Append($"  \"__InventoryFormat\": {InventorySidecarFormatVersion}");
+                if (items.Count > 0) sb.AppendLine(",");
+                else sb.AppendLine();
                 for (int i = 0; i < items.Count; i++)
                 {
-                    sb.Append($"  \"{items[i].Name}\": {items[i].Count}");
+                    if (items[i] == null || string.IsNullOrWhiteSpace(items[i].Name))
+                        throw new InvalidDataException(
+                            "Custom inventory contains an invalid item record.");
+                    if (!unique.Add(items[i].Name))
+                        throw new InvalidDataException(
+                            "Custom inventory contains a duplicate item record.");
+                    sb.Append($"  \"{SafeFileIO.EscapeJson(items[i].Name)}\": {Mathf.Max(0, items[i].Count)}");
                     if (i < items.Count - 1) sb.AppendLine(",");
                     else sb.AppendLine();
                 }
                 sb.AppendLine("}");
-                File.WriteAllText(path, sb.ToString());
+                if (!SafeFileIO.TryWriteAllTextAtomic(path, sb.ToString(), out string error))
+                    throw new IOException(error);
+                LoadedInventoryFormatVersion = InventorySidecarFormatVersion;
+                return true;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogError($"SaveInventoryFile error: {ex.Message}");
+                return false;
+            }
         }
 
         private static string GetPath()
         {
-            return Path.Combine(Paths.ConfigPath, "ClassicSkills",
+            return Path.Combine(RuntimePaths.DataDirectory,
                 $"{_charName}.json");
         }
 
         private static string GetInventoryPath()
         {
-            return Path.Combine(Paths.ConfigPath, "ClassicSkills",
+            return Path.Combine(RuntimePaths.DataDirectory,
                 $"{_charName}_inventory.json");
         }
 
-        private static string GetRecipesPath()
+        internal static string GetRecipesPath()
         {
-            return Path.Combine(Paths.ConfigPath, "ClassicSkills",
+            return Path.Combine(RuntimePaths.DataDirectory,
                 $"{_charName}_recipes.json");
         }
 
-        private static void LoadRecipesFile()
+        private static bool LoadRecipesFile()
         {
             try
             {
                 string path = GetRecipesPath();
-                if (!File.Exists(path))
+                if (!File.Exists(path) && !File.Exists(path + ".bak"))
                 {
                     // First time — grant starter recipes
                     _data.EnsureStarterRecipes();
-                    return;
+                    return true;
                 }
-                string json = File.ReadAllText(path).Trim();
+                if (!SafeFileIO.TryReadAllTextWithBackup(path, IsJsonArray,
+                    out string loaded, out bool recovered, out string readError))
+                    throw new InvalidDataException(readError);
+                string json = loaded.Trim();
                 if (string.IsNullOrEmpty(json) || json == "[]")
                 {
                     _data.EnsureStarterRecipes();
-                    return;
+                    return true;
                 }
 
                 _data.KnownRecipes.Clear();
-                // Parse simple JSON array: ["Recipe1", "Recipe2", ...]
-                json = json.TrimStart('[').TrimEnd(']');
-                string[] parts = json.Split(',');
-                foreach (var part in parts)
+                var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (Match match in Regex.Matches(json,
+                    "\\\"(?:\\\\.|[^\\\"\\\\])*\\\""))
                 {
-                    string name = part.Trim().Trim('"');
-                    if (!string.IsNullOrEmpty(name))
+                    if (!SafeFileIO.TryDecodeJsonStringToken(match.Value,
+                        out string name) || string.IsNullOrWhiteSpace(name) ||
+                        name.Length > 512)
+                        throw new InvalidDataException(
+                            "Known recipe data contains an invalid name.");
+                    if (known.Add(name))
                         _data.KnownRecipes.Add(name);
                 }
 
                 _data.EnsureStarterRecipes();
                 SkillsPlugin.Log.LogInfo($"Loaded {_data.KnownRecipes.Count} known recipes.");
+                if (recovered)
+                    SkillsPlugin.Log.LogWarning("Recovered known recipes from backup.");
+                return true;
             }
             catch (Exception ex)
             {
                 SkillsPlugin.Log.LogWarning($"LoadRecipesFile error: {ex.Message}");
-                _data.EnsureStarterRecipes();
+                return false;
             }
         }
 
-        public static void SaveRecipesFile()
+        public static bool SaveRecipesFile()
         {
-            if (!HasLoaded || string.IsNullOrEmpty(_charName)) return;
+            if (!HasLoaded || string.IsNullOrEmpty(_charName)) return false;
             try
             {
                 string path = GetRecipesPath();
-                var sb = new System.Text.StringBuilder();
-                sb.Append("[");
-                for (int i = 0; i < _data.KnownRecipes.Count; i++)
-                {
-                    sb.Append($"\"{_data.KnownRecipes[i]}\"");
-                    if (i < _data.KnownRecipes.Count - 1) sb.Append(", ");
-                }
-                sb.Append("]");
-                File.WriteAllText(path, sb.ToString());
+                string json = SerializeRecipesFile();
+                if (!SafeFileIO.TryWriteAllTextAtomic(path, json, out string error))
+                    throw new IOException(error);
+                return true;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogError($"SaveRecipesFile error: {ex.Message}");
+                return false;
+            }
+        }
+
+        internal static string SerializeRecipesFile()
+        {
+            var recipes = new List<string>(_data.KnownRecipes);
+            recipes.Sort(StringComparer.OrdinalIgnoreCase);
+            var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[");
+            for (int i = 0; i < recipes.Count; i++)
+            {
+                if (string.IsNullOrWhiteSpace(recipes[i]) ||
+                    recipes[i].Length > 512 || !unique.Add(recipes[i]))
+                    throw new InvalidDataException(
+                        "Known recipes contain an invalid or duplicate name.");
+                sb.Append($"\"{SafeFileIO.EscapeJson(recipes[i])}\"");
+                if (i < recipes.Count - 1) sb.Append(", ");
+            }
+            sb.Append("]");
+            string json = sb.ToString();
+            if (!IsRecipesJsonValid(json))
+                throw new InvalidDataException(
+                    "Generated recipe data failed validation.");
+            return json;
         }
 
         private static string GetBagsPath()
         {
-            return Path.Combine(Paths.ConfigPath, "ClassicSkills",
+            return Path.Combine(RuntimePaths.DataDirectory,
                 $"{_charName}_bags.json");
         }
 
-        private static void LoadBagsFile()
+        private static bool LoadBagsFile()
         {
             try
             {
                 string path = GetBagsPath();
-                if (!File.Exists(path))
+                if (!Items.BagSystem.RecoverPendingTransaction(path))
+                    return false;
+                if (!File.Exists(path) && !File.Exists(path + ".bak"))
                 {
                     Items.BagSystem.Reset();
-                    return;
+                    return true;
                 }
-                string json = File.ReadAllText(path).Trim();
-                Items.BagSystem.DeserializeBags(json);
+                if (!SafeFileIO.TryReadAllTextWithBackup(path,
+                    Items.BagSystem.IsSerializedDataValid, out string json,
+                    out bool recovered, out string readError))
+                    throw new InvalidDataException(readError);
+                if (!Items.BagSystem.DeserializeBags(json.Trim()))
+                    throw new InvalidDataException("Bag data could not be deserialized.");
                 SkillsPlugin.Log.LogInfo($"Loaded bag contents.");
+                if (recovered)
+                    SkillsPlugin.Log.LogWarning("Recovered bag contents from backup.");
+                return true;
             }
             catch (Exception ex)
             {
                 SkillsPlugin.Log.LogWarning($"LoadBagsFile error: {ex.Message}");
+                return false;
             }
         }
 
-        public static void SaveBagsFile()
+        public static bool SaveBagsFile()
         {
-            if (!HasLoaded || string.IsNullOrEmpty(_charName)) return;
+            if (string.IsNullOrEmpty(_charName)) return false;
             try
             {
                 string path = GetBagsPath();
                 string json = Items.BagSystem.SerializeBags();
-                File.WriteAllText(path, json);
+                if (!Items.BagSystem.IsSerializedDataValid(json))
+                    throw new InvalidDataException("Refusing to write invalid bag data.");
+                if (!SafeFileIO.TryWriteAllTextAtomic(path, json, out string error))
+                    throw new IOException(error);
+                return true;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogError($"SaveBagsFile error: {ex.Message}");
+                return false;
+            }
         }
+
+        internal static bool IsInventoryJsonValid(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return false;
+            string value = json.Trim();
+            if (!Regex.IsMatch(value,
+                "^\\{\\s*(?:\\\"(?:\\\\.|[^\"\\\\])*\\\"\\s*:\\s*\\d+\\s*" +
+                "(?:,\\s*\\\"(?:\\\\.|[^\"\\\\])*\\\"\\s*:\\s*\\d+\\s*)*)?\\}$"))
+                return false;
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var matches = Regex.Matches(value,
+                "(\\\"(?:\\\\.|[^\\\"\\\\])*\\\")\\s*:\\s*(\\d+)");
+            if (matches.Count > 10000) return false;
+            foreach (Match match in matches)
+            {
+                if (!SafeFileIO.TryDecodeJsonStringToken(match.Groups[1].Value,
+                    out string name) || string.IsNullOrWhiteSpace(name) ||
+                    name.Length > 512 || !names.Add(name) ||
+                    !int.TryParse(match.Groups[2].Value, out int count)) return false;
+                if (string.Equals(name, "__InventoryFormat",
+                    StringComparison.Ordinal) &&
+                    (count < 1 || count > InventorySidecarFormatVersion))
+                    return false;
+            }
+            return true;
+        }
+
+        private static bool IsJsonArray(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return false;
+            string value = json.Trim();
+            if (!Regex.IsMatch(value,
+                "^\\[\\s*(?:\\\"(?:\\\\.|[^\"\\\\])*\\\"\\s*" +
+                "(?:,\\s*\\\"(?:\\\\.|[^\"\\\\])*\\\"\\s*)*)?\\]$"))
+                return false;
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var matches = Regex.Matches(value,
+                "\\\"(?:\\\\.|[^\\\"\\\\])*\\\"");
+            if (matches.Count > 10000) return false;
+            foreach (Match match in matches)
+            {
+                if (!SafeFileIO.TryDecodeJsonStringToken(match.Value,
+                    out string name) || string.IsNullOrWhiteSpace(name) ||
+                    name.Length > 512 || !names.Add(name)) return false;
+            }
+            return true;
+        }
+
+        internal static bool IsRecipesJsonValid(string json) => IsJsonArray(json);
 
         private static string SanitizeName(string name)
         {
+            if (string.IsNullOrWhiteSpace(name)) return "";
             foreach (char c in Path.GetInvalidFileNameChars())
                 name = name.Replace(c, '_');
             return name;

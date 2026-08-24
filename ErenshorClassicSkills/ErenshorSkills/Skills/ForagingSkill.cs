@@ -31,7 +31,12 @@ namespace ErenshorSkills.Skills
     /// </summary>
     public static class ForagingSkill
     {
-        private static float _lastForageTime = 0f;
+        private static float _lastForageTime = float.NegativeInfinity;
+
+        internal static void ResetRuntime()
+        {
+            _lastForageTime = float.NegativeInfinity;
+        }
 
         /// <summary>
         /// Cooldown in seconds. In EverQuest, Foraging had roughly a 
@@ -43,6 +48,21 @@ namespace ErenshorSkills.Skills
             SkillsPlugin.CfgTestCooldowns.Value
                 ? 1f
                 : Mathf.Max(90f - SkillsSaveManager.Data.Foraging.Level * 0.9f, 45f);
+
+        /// <summary>Safe, finite cooldown time remaining for HUD display.</summary>
+        public static float CooldownRemaining
+        {
+            get
+            {
+                if (float.IsNegativeInfinity(_lastForageTime)) return 0f;
+                float remaining = Cooldown - (Time.time - _lastForageTime);
+                if (float.IsNaN(remaining) || float.IsInfinity(remaining))
+                    return 0f;
+                return Mathf.Max(0f, remaining);
+            }
+        }
+
+        public static bool IsReady => CooldownRemaining <= 0f;
 
         // ═════════════════════════════════════════════════════════════
         // Foraged item definition
@@ -117,7 +137,6 @@ namespace ErenshorSkills.Skills
             // Must be out of combat
             try
             {
-                var player = GameData.PlayerControl;
                 if (GameData.InCombat)
                 {
                     ChatHelper.Send(
@@ -126,7 +145,12 @@ namespace ErenshorSkills.Skills
                     return;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogWarning(
+                    $"Foraging stopped because combat state was unavailable: {ex.Message}");
+                return;
+            }
 
             _lastForageTime = Time.time;
 
@@ -162,8 +186,12 @@ namespace ErenshorSkills.Skills
             if (success)
             {
                 ForageItem item = RollForageItem(zone, skill.Level);
-                AddForagedItemToInventory(item);
-                DisplayForagedItem(item);
+                if (AddForagedItemToInventory(item))
+                    DisplayForagedItem(item);
+                else
+                    ChatHelper.Send(
+                        "<color=#EF5350>[Foraging]</color> Your inventory is full; " +
+                        "you could not collect the find.");
             }
             else
             {
@@ -613,7 +641,7 @@ namespace ErenshorSkills.Skills
                 "Carved Wooden Totem", "Charm", "Wisdom", 0.4f, 15, 12,
                 "A tiny animal spirit carved from driftwood."));
             table.Add(ForageItem.MakeEquip(
-                "Glimmering Geode Fragment", "Charm", "Intelligence", 0.5f, 22, 30,
+                "Glimmering Geode Talisman", "Charm", "Intelligence", 0.5f, 22, 30,
                 "Half a geode, crystals still sparkling inside."));
             table.Add(ForageItem.MakeEquip(
                 "Petrified Dragon Tooth", "Charm", "Strength", 0.7f, 38, 75,
@@ -655,6 +683,62 @@ namespace ErenshorSkills.Skills
             return table;
         }
 
+        /// <summary>
+        /// Resolve the immutable definition behind a persisted level-scaled
+        /// forage item. ItemFactory uses this when the native save loader asks
+        /// for a deterministic CS_FORAGE item ID after a restart.
+        /// </summary>
+        internal static bool TryGetEquipmentDefinition(string itemName,
+            out string slot, out string statType, out float statPerLevel,
+            out string description)
+        {
+            slot = null;
+            statType = null;
+            statPerLevel = 0f;
+            description = null;
+            if (string.IsNullOrWhiteSpace(itemName)) return false;
+
+            string[] definitionZones =
+            {
+                "", "Azynthi", "Soluna", "Malaroth", "Blight", "Brake"
+            };
+            foreach (string zone in definitionZones)
+            {
+                foreach (var item in GetEquipmentTable(zone))
+                {
+                    if (!string.Equals(item.Name, itemName,
+                        StringComparison.OrdinalIgnoreCase)) continue;
+                    slot = item.Slot;
+                    statType = item.StatType;
+                    statPerLevel = item.StatPerLevel;
+                    description = item.Description;
+                    return !string.IsNullOrWhiteSpace(slot) &&
+                        !string.IsNullOrWhiteSpace(statType) && statPerLevel > 0f;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Complete deterministic list of rare equipment definitions for the
+        /// opt-in in-game catalog smoke test and item-grant search.
+        /// </summary>
+        internal static List<string> GetEquipmentNamesForTesting()
+        {
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string[] definitionZones =
+            {
+                "", "Azynthi", "Soluna", "Malaroth", "Blight", "Brake"
+            };
+            foreach (string zone in definitionZones)
+                foreach (var item in GetEquipmentTable(zone))
+                    if (item != null && !string.IsNullOrWhiteSpace(item.Name))
+                        names.Add(item.Name);
+            var result = new List<string>(names);
+            result.Sort(StringComparer.OrdinalIgnoreCase);
+            return result;
+        }
+
         // ═════════════════════════════════════════════════════════════
         // Inventory integration
         // ═════════════════════════════════════════════════════════════
@@ -664,41 +748,56 @@ namespace ErenshorSkills.Skills
         /// ItemFactory system. Items are real game objects with icons,
         /// stats, and full inventory integration.
         /// </summary>
-        private static void AddForagedItemToInventory(ForageItem item)
+        private static bool AddForagedItemToInventory(ForageItem item)
         {
+            ErenshorSkills.Items.BagSystem.MutationSnapshot mutation = null;
+            Item generatedEquipment = null;
             try
             {
+                if (item == null || !SkillsSaveManager.HasLoaded) return false;
+                mutation = ErenshorSkills.Items.BagSystem.BeginExternalMutation();
                 if (item.IsEquipment)
                 {
                     // Equipment: create a level-scaled item
-                    var equip = ErenshorSkills.Items.ItemFactory.CreateScaledEquipment(
+                    generatedEquipment = ErenshorSkills.Items.ItemFactory.CreateScaledEquipment(
                         item.Name, item.Slot, item.StatType,
                         item.StatPerLevel, item.Description);
 
-                    if (equip != null)
+                    if (generatedEquipment != null)
                     {
                         var inventory = GameData.PlayerInv;
-                        inventory?.AddItemToInv(equip);
-                        return;
+                        if (inventory == null ||
+                            !ErenshorSkills.Items.ItemFactory.CanAddItemToPlayer(
+                                generatedEquipment, 1))
+                            return false;
+                        if (!inventory.AddItemToInv(generatedEquipment, 1))
+                        {
+                            ErenshorSkills.Items.BagSystem.RollbackExternalMutation(mutation);
+                            return false;
+                        }
                     }
+                    else return false;
+                }
+                else if (!ErenshorSkills.Items.ItemFactory.GiveItemToPlayer(item.Name))
+                {
+                    ErenshorSkills.Items.BagSystem.RollbackExternalMutation(mutation);
+                    return false;
                 }
 
-                // Non-equipment: use the pre-registered item from ItemFactory
-                if (!ErenshorSkills.Items.ItemFactory.GiveItemToPlayer(item.Name))
-                {
-                    // Final fallback: award gold
-                    if (item.GoldValue > 0)
-                    {
-                        var stats = GameData.PlayerStats;
-                        if (stats != null)
-                            GameData.PlayerInv.Gold += item.GoldValue;
-                    }
-                }
+                if (ErenshorSkills.Items.BagSystem.CommitExternalMutation(
+                    "foraging-reward", mutation))
+                    return true;
+
+                ErenshorSkills.Items.BagSystem.RollbackExternalMutation(mutation);
+                return false;
             }
             catch (Exception ex)
             {
+                if (mutation != null)
+                    ErenshorSkills.Items.BagSystem.RollbackExternalMutation(mutation);
                 SkillsPlugin.Log.LogError(
                     $"Error adding foraged item '{item.Name}': {ex.Message}");
+                return false;
             }
         }
 

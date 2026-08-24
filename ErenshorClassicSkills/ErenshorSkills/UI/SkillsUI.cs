@@ -3,6 +3,9 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
+using TMPro;
+using ErenshorSkills.UI;
+using FontStyle = TMPro.FontStyles;
 
 namespace ErenshorSkills
 {
@@ -20,8 +23,12 @@ namespace ErenshorSkills
 
         GameObject _canvasGO;
         RectTransform _windowPanel;
+        RectTransform _leftPage;
+        RectTransform _rightPage;
         RectTransform _contentParent;
-        Text _titleText;
+        RectTransform _bonusContentParent;
+        TextMeshProUGUI _titleText;
+        TextMeshProUGUI _noBonusesText;
 
         readonly List<SkillRowUI> _utilRows = new List<SkillRowUI>();
         readonly List<CombatRowUI> _combatRows = new List<CombatRowUI>();
@@ -29,6 +36,36 @@ namespace ErenshorSkills
         readonly List<CombatRowUI> _magicRows = new List<CombatRowUI>();
         readonly List<BonusRowUI> _bonusRows = new List<BonusRowUI>();
         bool _built;
+
+        internal static int BonusRowCountForTesting =>
+            _instance ? _instance._bonusRows.Count : 0;
+
+        internal static int VisibleBonusRowCountForTesting => _instance
+            ? _instance._bonusRows.FindAll(row =>
+                row.root && row.root.gameObject.activeSelf).Count
+            : 0;
+
+        internal static bool HasCompleteBonusCoverageForTesting
+        {
+            get
+            {
+                if (!_instance) return false;
+                string[] required = {
+                    "catch_bonus", "forage_cooldown", "swim", "bind",
+                    "med", "food", "beg_chance",
+                    "combat:1H Slashing", "combat:1H Blunt",
+                    "combat:Piercing", "combat:2H Slashing",
+                    "combat:2H Blunt", "combat:Archery", "combat:Wands",
+                    "combat:Hand to Hand", "magic:Evocation",
+                    "magic:Abjuration", "magic:Alteration",
+                    "magic:Conjuration"
+                };
+                foreach (string key in required)
+                    if (!_instance._bonusRows.Exists(row => row.key == key))
+                        return false;
+                return true;
+            }
+        }
 
         // ── Colors (matched to game's inventory panel style) ─────────
         static readonly Color C_WinBg    = c(0.08f, 0.12f, 0.15f, 0.96f);  // Dark teal-blue
@@ -49,8 +86,8 @@ namespace ErenshorSkills
             c(1f,0.67f,0.25f),    c(0.74f,0.67f,0.64f),
         };
 
-        const float W = 390, H = 720, TITLE = 30, PAD = 6;
-        const float ROW = 42, CROW = 44, HDR = 24, GAP = 3;
+        const float W = 610, H = 660, TITLE = 56, PAD = 6;
+        const float ROW = 46, CROW = 46, HDR = 24, GAP = 3;
 
         // ══════════════════════════════════════════════════════════════
         // PUBLIC API
@@ -62,7 +99,12 @@ namespace ErenshorSkills
             if (_instance) _instance.SetVis(_showWindow);
             SkillsPlugin.Log.LogInfo($"SkillsUI: toggled {_showWindow}");
         }
-        public static void DoOnGUI() { }
+
+        public static void CloseWindow()
+        {
+            _showWindow = false;
+            if (_instance) _instance.SetVis(false);
+        }
 
         // ══════════════════════════════════════════════════════════════
         // LIFECYCLE
@@ -72,14 +114,12 @@ namespace ErenshorSkills
 
         void Start()
         {
-            try { Build(); _built = true; SetVis(false);
-                SkillsPlugin.Log.LogInfo(
-                    $"SkillsUI: built. util={_utilRows.Count} combat={_combatRows.Count} trade={_tradeRows.Count}");
-            } catch (Exception ex) { SkillsPlugin.Log.LogError($"SkillsUI build: {ex}"); }
+            TryBuildWhenNativeUiIsReady();
         }
 
         void LateUpdate()
         {
+            if (!_built) TryBuildWhenNativeUiIsReady();
             if (_built && _showWindow && _canvasGO && _canvasGO.activeSelf)
             {
                 Refresh();
@@ -87,7 +127,40 @@ namespace ErenshorSkills
             }
         }
 
-        void OnDestroy() { if (_canvasGO) Destroy(_canvasGO); }
+        void TryBuildWhenNativeUiIsReady()
+        {
+            if (_built || !SkillsSaveManager.HasLoaded ||
+                !NativeUiStyle.NativeSourcesAvailable ||
+                !NativeEventSystemGate.IsReady) return;
+            try
+            {
+                NativeUiStyle.Reset();
+                Build();
+                _built = true;
+                SetVis(_showWindow);
+                SkillsPlugin.Log.LogInfo(
+                    $"SkillsUI: native book built. util={_utilRows.Count} " +
+                    $"combat={_combatRows.Count} trade={_tradeRows.Count}");
+            }
+            catch (Exception ex)
+            {
+                SkillsPlugin.Log.LogError($"SkillsUI build: {ex}");
+            }
+        }
+
+        void OnDestroy()
+        {
+            if (_canvasGO) Destroy(_canvasGO);
+            if (ReferenceEquals(_instance, this)) _instance = null;
+            _showWindow = false;
+            _tooltipGO = null;
+            _tooltipText = null;
+            _tooltipRT = null;
+            if (_ws) Destroy(_ws);
+            if (_wt) Destroy(_wt);
+            _ws = null;
+            _wt = null;
+        }
 
         // ══════════════════════════════════════════════════════════════
         // BUILD
@@ -95,14 +168,6 @@ namespace ErenshorSkills
 
         void Build()
         {
-            if (!FindObjectOfType<EventSystem>())
-            {
-                var es = new GameObject("CS_ES");
-                es.AddComponent<EventSystem>();
-                es.AddComponent<StandaloneInputModule>();
-                DontDestroyOnLoad(es);
-            }
-
             _canvasGO = new GameObject("CS_Canvas");
             DontDestroyOnLoad(_canvasGO);
             var cv = _canvasGO.AddComponent<Canvas>();
@@ -114,55 +179,54 @@ namespace ErenshorSkills
             sc.matchWidthOrHeight = 0.5f;
             _canvasGO.AddComponent<GraphicRaycaster>();
 
-            // Window
-            _windowPanel = Rect(_canvasGO.transform, "Win");
-            Img(_windowPanel, C_WinBg);
+            // Two native pages, matching Erenshor's Skills/Spells book layout.
+            _windowPanel = Rect(_canvasGO.transform, "ClassicSkillsBook");
+            Img(_windowPanel, Color.clear);
             _windowPanel.anchorMin = V(0, 1); _windowPanel.anchorMax = V(0, 1);
             _windowPanel.pivot = V(0, 1);
-            _windowPanel.anchoredPosition = V(20, -60);
+            _windowPanel.anchoredPosition = V(20, -80);
             _windowPanel.sizeDelta = V(W, H);
-            _windowPanel.gameObject.AddComponent<Outline>().effectColor = C_Border;
-            _windowPanel.gameObject.GetComponent<Outline>().effectDistance = new Vector2(1.5f, -1.5f);
             _windowPanel.gameObject.AddComponent<InputBlocker>();
 
-            // Title bar (matching game's teal header style)
-            var titleRT = Rect(_windowPanel, "Title");
-            Img(titleRT, C_Title);
+            _leftPage = BuildNativePage(_windowPanel, "BonusPage", 0f);
+            _rightPage = BuildNativePage(_windowPanel, "SkillsPage", 310f);
+
+            // Erenshor's native books use title text directly over the carved
+            // page, without an addon title strip or red close box.
+            var titleRT = Rect(_rightPage, "TitleDrag");
+            Img(titleRT, Color.clear);
             StretchH(titleRT, 0, TITLE);
             titleRT.gameObject.AddComponent<WindowDragger>().target = _windowPanel;
-            // Add border line at bottom of title
-            var titleBorder = Rect(titleRT, "TBorder");
-            Img(titleBorder, C_Border);
-            titleBorder.anchorMin = V(0, 0); titleBorder.anchorMax = V(1, 0);
-            titleBorder.pivot = V(0.5f, 0); titleBorder.sizeDelta = V(0, 1);
-            titleBorder.anchoredPosition = V(0, 0);
 
-            // Close button FIRST (so it renders on top and gets click priority)
-            var clRT = Rect(titleRT, "Close");
-            Img(clRT, c(0.6f, 0.15f, 0.15f, 0.9f));
-            clRT.anchorMin = V(1, 0.5f); clRT.anchorMax = V(1, 0.5f);
-            clRT.pivot = V(1, 0.5f);
-            clRT.anchoredPosition = V(-4, 0); clRT.sizeDelta = V(22, 22);
-            var btn = clRT.gameObject.AddComponent<Button>();
-            btn.targetGraphic = clRT.GetComponent<Image>();
-            btn.onClick.AddListener(() => ToggleWindow());
-            var ct = Txt(clRT, "\u2715", 12, Color.white, TextAnchor.MiddleCenter);
-            ct.fontStyle = FontStyle.Bold; Fill(ct.rectTransform);
-
-            // Title text (after close button; don't cover close button area)
-            _titleText = Txt(titleRT, "Skills", 16, Color.white, TextAnchor.MiddleCenter);
+            _titleText = Txt(titleRT, "Skills", 30, Color.white,
+                TextAnchor.MiddleCenter);
             _titleText.fontStyle = FontStyle.Bold;
-            _titleText.rectTransform.anchorMin = V(0, 0);
-            _titleText.rectTransform.anchorMax = V(1, 1);
-            _titleText.rectTransform.offsetMin = V(8, 0);
-            _titleText.rectTransform.offsetMax = V(-30, 0);
+            Fill(_titleText.rectTransform);
             _titleText.raycastTarget = false;
 
-            float y = TITLE + 4;
+            var closeRT = Rect(_rightPage, "Close");
+            var closeImage = Img(closeRT, c(0.72f, 0.16f, 0.16f, 0.95f));
+            NativeUiStyle.Apply(closeImage, NativeUiStyle.Role.Button,
+                c(0.72f, 0.16f, 0.16f, 0.95f));
+            closeImage.color = c(0.72f, 0.16f, 0.16f, 0.95f);
+            closeRT.anchorMin = V(1, 1); closeRT.anchorMax = V(1, 1);
+            closeRT.pivot = V(1, 1);
+            closeRT.anchoredPosition = V(-6, -6);
+            closeRT.sizeDelta = V(28, 24);
+            var closeButton = closeRT.gameObject.AddComponent<Button>();
+            closeButton.targetGraphic = closeImage;
+            closeButton.navigation = new Navigation { mode = Navigation.Mode.None };
+            closeButton.onClick.AddListener(CloseWindow);
+            var closeText = Txt(closeRT, "X", 15, Color.white,
+                TextAnchor.MiddleCenter);
+            closeText.fontStyle = FontStyle.Bold;
+            Fill(closeText.rectTransform);
+
+            float y = TITLE + 2;
 
             // Scroll area dimensions
-            float bonusH = 128, footerH = 20;
-            float scrollH = H - y - bonusH - footerH - 8;
+            float bonusH = H, footerH = 28;
+            float scrollH = H - y - footerH - 10;
 
             // Build scroll
             BuildScroll(y, scrollH);
@@ -209,13 +273,26 @@ namespace ErenshorSkills
                 $"scroll viewport = {scrollH:F0}px");
 
             // Bonus panel
-            BuildBonusPanel(y + scrollH + 4, bonusH);
+            BuildBonusPanel(0, bonusH);
 
             // Footer
-            var ft = Txt(_windowPanel,
+            var ft = Txt(_rightPage,
                 $"F8 to close  |  /skills in chat",
-                10, c(0.35f, 0.45f, 0.48f), TextAnchor.MiddleCenter);
+                13, c(0.62f, 0.74f, 0.77f), TextAnchor.MiddleCenter);
             StretchH(ft.rectTransform, H - footerH - 2, footerH);
+        }
+
+        RectTransform BuildNativePage(Transform parent, string name, float x)
+        {
+            var page = Rect(parent, name);
+            var image = Img(page, C_WinBg);
+            NativeUiStyle.Apply(image, NativeUiStyle.Role.Window, C_WinBg);
+            page.anchorMin = V(0, 1);
+            page.anchorMax = V(0, 1);
+            page.pivot = V(0, 1);
+            page.anchoredPosition = V(x, 0);
+            page.sizeDelta = V(300, H);
+            return page;
         }
 
         // ══════════════════════════════════════════════════════════════
@@ -224,7 +301,7 @@ namespace ErenshorSkills
 
         void BuildScroll(float yTop, float h)
         {
-            var sRT = Rect(_windowPanel, "Scroll");
+            var sRT = Rect(_rightPage, "Scroll");
             Img(sRT, Color.clear);
             StretchH(sRT, yTop, h, 4, 4);
 
@@ -250,7 +327,9 @@ namespace ErenshorSkills
 
             // Scrollbar
             var sbRT = Rect(sRT, "SB");
-            Img(sbRT, c(0.10f, 0.16f, 0.20f, 0.5f));
+            var sbImage = Img(sbRT, c(0.10f, 0.16f, 0.20f, 0.5f));
+            NativeUiStyle.Apply(sbImage, NativeUiStyle.Role.Input,
+                c(0.10f, 0.16f, 0.20f, 0.5f));
             sbRT.anchorMin = V(1, 0); sbRT.anchorMax = V(1, 1);
             sbRT.pivot = V(1, 0.5f);
             sbRT.sizeDelta = V(6, 0); sbRT.anchoredPosition = V(3, 0);
@@ -260,7 +339,10 @@ namespace ErenshorSkills
 
             var area = Rect(sbRT, "Area"); Fill(area);
             var handle = Rect(area, "Handle");
-            Img(handle, c(0.30f, 0.45f, 0.50f, 0.7f)); Fill(handle);
+            var handleImage = Img(handle, c(0.30f, 0.45f, 0.50f, 0.7f));
+            NativeUiStyle.Apply(handleImage, NativeUiStyle.Role.Button,
+                c(0.30f, 0.45f, 0.50f, 0.7f));
+            Fill(handle);
             sb.handleRect = handle;
             sb.targetGraphic = handle.GetComponent<Image>();
             sr.verticalScrollbar = sb;
@@ -324,7 +406,8 @@ namespace ErenshorSkills
 
             // Container
             var cRT = Rect(_contentParent, skill.Name);
-            Img(cRT, C_Panel);
+            var rowImage = Img(cRT, Color.white);
+            NativeUiStyle.Apply(rowImage, NativeUiStyle.Role.Tab, C_Panel);
             PlaceAt(cRT, y, ROW);
 
             // Attach tooltip hover
@@ -341,13 +424,15 @@ namespace ErenshorSkills
 
             // Train "+" button (top-right, before level)
             var btnRT = Rect(cRT, "Train");
-            Img(btnRT, c(0.12f, 0.40f, 0.30f, 0.9f));
+            var trainImage = Img(btnRT, c(0.56f, 0.66f, 0.69f, 1f));
+            NativeUiStyle.Apply(trainImage, NativeUiStyle.Role.Plus,
+                c(0.12f, 0.40f, 0.30f, 0.9f));
             btnRT.anchorMin = V(0.55f, 1); btnRT.anchorMax = V(0.55f, 1);
             btnRT.pivot = V(0, 1);
-            btnRT.anchoredPosition = V(0, -3); btnRT.sizeDelta = V(18, 16);
+            btnRT.anchoredPosition = V(0, -1); btnRT.sizeDelta = V(22, 22);
             row.trainBtn = btnRT.gameObject.AddComponent<Button>();
             row.trainBtn.targetGraphic = btnRT.GetComponent<Image>();
-            var btnTxt = Txt(btnRT, "+", 11, Color.white, TextAnchor.MiddleCenter);
+            var btnTxt = Txt(btnRT, "", 11, Color.white, TextAnchor.MiddleCenter);
             btnTxt.fontStyle = FontStyle.Bold; Fill(btnTxt.rectTransform);
             var thisRow = row;
             row.trainBtn.onClick.AddListener(() => OnTrainClick(thisRow.skill));
@@ -363,20 +448,16 @@ namespace ErenshorSkills
 
             // XP bar (middle band: y=22 to y=36 from top)
             var barRT = Rect(cRT, "Bar");
-            Img(barRT, C_BarBg);
+            var barImage = Img(barRT, C_BarBg);
+            NativeUiStyle.Apply(barImage, NativeUiStyle.Role.Progress, C_BarBg);
             barRT.anchorMin = V(0, 1);
             barRT.anchorMax = V(1, 1);
             barRT.pivot = V(0.5f, 1);
             barRT.offsetMin = V(PAD, -36);
             barRT.offsetMax = V(-PAD, -22);
 
-            // Fill
-            var fillRT = Rect(barRT, "Fill");
-            Img(fillRT, accent * 0.7f).raycastTarget = false;
-            fillRT.anchorMin = V(0, 0); fillRT.anchorMax = V(0, 1);
-            fillRT.pivot = V(0, 0.5f);
-            fillRT.offsetMin = V(1, 1); fillRT.offsetMax = V(0, -1);
-            row.barFill = fillRT;
+            row.barFill = CreateProgressFill(barRT, "Fill",
+                accent * 0.7f, 5, 4);
 
             // XP text overlay on bar
             row.xpText = Txt(barRT, "", 9, Color.white, TextAnchor.MiddleCenter);
@@ -394,7 +475,8 @@ namespace ErenshorSkills
             Color accent = overrideColor ?? C_Combat;
 
             var cRT = Rect(_contentParent, info.Name);
-            Img(cRT, C_Panel);
+            var rowImage = Img(cRT, Color.white);
+            NativeUiStyle.Apply(rowImage, NativeUiStyle.Role.Tab, C_Panel);
             PlaceAt(cRT, y, ROW);
 
             // Attach tooltip hover
@@ -411,13 +493,15 @@ namespace ErenshorSkills
 
             // Train "+" button
             var btnRT = Rect(cRT, "Train");
-            Img(btnRT, c(0.12f, 0.40f, 0.30f, 0.9f));
+            var trainImage = Img(btnRT, c(0.56f, 0.66f, 0.69f, 1f));
+            NativeUiStyle.Apply(trainImage, NativeUiStyle.Role.Plus,
+                c(0.12f, 0.40f, 0.30f, 0.9f));
             btnRT.anchorMin = V(0.50f, 1); btnRT.anchorMax = V(0.50f, 1);
             btnRT.pivot = V(0, 1);
-            btnRT.anchoredPosition = V(0, -3); btnRT.sizeDelta = V(18, 16);
+            btnRT.anchoredPosition = V(0, -1); btnRT.sizeDelta = V(22, 22);
             row.trainBtn = btnRT.gameObject.AddComponent<Button>();
             row.trainBtn.targetGraphic = btnRT.GetComponent<Image>();
-            var btnTxt = Txt(btnRT, "+", 11, Color.white, TextAnchor.MiddleCenter);
+            var btnTxt = Txt(btnRT, "", 11, Color.white, TextAnchor.MiddleCenter);
             btnTxt.fontStyle = FontStyle.Bold; Fill(btnTxt.rectTransform);
             var thisRow = row;
             row.trainBtn.onClick.AddListener(() => OnTrainClick(thisRow.skill));
@@ -442,19 +526,16 @@ namespace ErenshorSkills
 
             // XP bar (middle band: y=22 to y=36 from top)
             var barRT = Rect(cRT, "Bar");
-            Img(barRT, C_BarBg);
+            var barImage = Img(barRT, C_BarBg);
+            NativeUiStyle.Apply(barImage, NativeUiStyle.Role.Progress, C_BarBg);
             barRT.anchorMin = V(0, 1);
             barRT.anchorMax = V(1, 1);
             barRT.pivot = V(0.5f, 1);
             barRT.offsetMin = V(PAD, -36);
             barRT.offsetMax = V(-PAD, -22);
 
-            var fillRT = Rect(barRT, "Fill");
-            Img(fillRT, accent * 0.6f).raycastTarget = false;
-            fillRT.anchorMin = V(0, 0); fillRT.anchorMax = V(0, 1);
-            fillRT.pivot = V(0, 0.5f);
-            fillRT.offsetMin = V(1, 1); fillRT.offsetMax = V(0, -1);
-            row.barFill = fillRT;
+            row.barFill = CreateProgressFill(barRT, "Fill",
+                accent * 0.6f, 5, 4);
 
             // XP text on bar
             row.hitsText = Txt(barRT, "", 9, Color.white, TextAnchor.MiddleCenter);
@@ -474,47 +555,159 @@ namespace ErenshorSkills
             rt.offsetMax = V(-2, -y);
         }
 
+        RectTransform CreateProgressFill(RectTransform track, string name,
+            Color color, float horizontalInset, float verticalInset)
+        {
+            var clip = Rect(track, name + "Clip");
+            Img(clip, Color.clear).raycastTarget = false;
+            Fill(clip);
+            clip.offsetMin = V(horizontalInset, verticalInset);
+            clip.offsetMax = V(-horizontalInset, -verticalInset);
+            clip.gameObject.AddComponent<RectMask2D>();
+
+            var fill = Rect(clip, name);
+            Img(fill, color).raycastTarget = false;
+            fill.pivot = V(0, 0.5f);
+            SetProgressFill(fill, 0f);
+            return fill;
+        }
+
+        static void SetProgressFill(RectTransform fill, float value)
+        {
+            if (!fill) return;
+            fill.anchorMin = V(0, 0);
+            fill.anchorMax = V(Mathf.Clamp01(value), 1);
+            fill.offsetMin = Vector2.zero;
+            fill.offsetMax = Vector2.zero;
+        }
+
         // ══════════════════════════════════════════════════════════════
         // BONUS PANEL
         // ══════════════════════════════════════════════════════════════
 
         void BuildBonusPanel(float yTop, float h)
         {
-            var pRT = Rect(_windowPanel, "Bonus");
-            Img(pRT, C_Panel);
-            StretchH(pRT, yTop, h, 6, 6);
+            var pRT = Rect(_leftPage, "BonusContent");
+            Img(pRT, Color.clear);
+            Fill(pRT);
 
-            float by = 3;
-            var hdr = Txt(pRT, "Active Bonuses", 14, C_Gold, TextAnchor.MiddleCenter);
+            float by = 12;
+            var hdr = Txt(pRT, "Active Bonuses", 28, Color.white,
+                TextAnchor.MiddleCenter);
             hdr.fontStyle = FontStyle.Bold;
-            BonusPlace(hdr.rectTransform, by, 20); by += 21;
+            BonusPlace(hdr.rectTransform, by, 42); by += 58;
 
-            AddBLine(pRT, ref by, "Fishing: Catch Bonus", "catch_bonus");
-            AddBLine(pRT, ref by, "Swim Speed", "swim");
-            AddBLine(pRT, ref by, "Bind Wound Heal", "bind");
-            AddBLine(pRT, ref by, "Meditate Mana/tick", "med");
-            AddBLine(pRT, ref by, "Consumable Bonus", "food");
+            var scrollRT = Rect(pRT, "BonusScroll");
+            Img(scrollRT, Color.clear);
+            scrollRT.anchorMin = V(0, 1); scrollRT.anchorMax = V(1, 1);
+            scrollRT.pivot = V(0.5f, 1);
+            scrollRT.offsetMin = V(4, -(h - 8));
+            scrollRT.offsetMax = V(-4, -by);
+
+            var scroll = scrollRT.gameObject.AddComponent<ScrollRect>();
+            scroll.horizontal = false;
+            scroll.vertical = true;
+            scroll.movementType = ScrollRect.MovementType.Clamped;
+            scroll.scrollSensitivity = 25;
+
+            var viewport = Rect(scrollRT, "Viewport");
+            Img(viewport, Color.clear);
+            Fill(viewport);
+            viewport.offsetMax = V(-8, 0);
+            viewport.gameObject.AddComponent<RectMask2D>();
+
+            _bonusContentParent = Rect(viewport, "Content");
+            _bonusContentParent.anchorMin = V(0, 1);
+            _bonusContentParent.anchorMax = V(1, 1);
+            _bonusContentParent.pivot = V(0.5f, 1);
+            _bonusContentParent.anchoredPosition = Vector2.zero;
+            _bonusContentParent.sizeDelta = Vector2.zero;
+            scroll.viewport = viewport;
+            scroll.content = _bonusContentParent;
+
+            var sbRT = Rect(scrollRT, "SB");
+            var sbImage = Img(sbRT, c(0.10f, 0.16f, 0.20f, 0.5f));
+            NativeUiStyle.Apply(sbImage, NativeUiStyle.Role.Input,
+                c(0.10f, 0.16f, 0.20f, 0.5f));
+            sbRT.anchorMin = V(1, 0); sbRT.anchorMax = V(1, 1);
+            sbRT.pivot = V(1, 0.5f);
+            sbRT.sizeDelta = V(6, 0); sbRT.anchoredPosition = V(3, 0);
+            var scrollbar = sbRT.gameObject.AddComponent<Scrollbar>();
+            scrollbar.direction = Scrollbar.Direction.BottomToTop;
+            var area = Rect(sbRT, "Area"); Fill(area);
+            var handle = Rect(area, "Handle");
+            var handleImage = Img(handle, c(0.30f, 0.45f, 0.50f, 0.7f));
+            NativeUiStyle.Apply(handleImage, NativeUiStyle.Role.Button,
+                c(0.30f, 0.45f, 0.50f, 0.7f));
+            Fill(handle);
+            scrollbar.handleRect = handle;
+            scrollbar.targetGraphic = handleImage;
+            scroll.verticalScrollbar = scrollbar;
+            scroll.verticalScrollbarVisibility =
+                ScrollRect.ScrollbarVisibility.AutoHideAndExpandViewport;
+
+            float rowY = 0;
+            AddBLine(ref rowY, "Fishing Catch Chance", "catch_bonus");
+            AddBLine(ref rowY, "Foraging Cooldown", "forage_cooldown");
+            AddBLine(ref rowY, "Swimming Speed", "swim");
+            AddBLine(ref rowY, "Bind Wound Heal / CD", "bind");
+            AddBLine(ref rowY, "Meditate Mana / tick", "med");
+            AddBLine(ref rowY, "Food Buff Duration", "food");
+            AddBLine(ref rowY, "Begging Success Chance", "beg_chance");
+
+            foreach (var info in Skills.CombatSkills.GetActiveCombatSkills())
+                AddBLine(ref rowY, info.Name + " Damage",
+                    "combat:" + info.Name);
+
+            AddBLine(ref rowY, "Evocation Spell Damage", "magic:Evocation");
+            AddBLine(ref rowY, "Abjuration Buff Duration", "magic:Abjuration");
+            AddBLine(ref rowY, "Alteration Healing", "magic:Alteration");
+            AddBLine(ref rowY, "Conjuration DoT / Pet Damage",
+                "magic:Conjuration");
+
+            _noBonusesText = Txt(_bonusContentParent,
+                "No earned skill bonuses yet.", 15, C_Dim,
+                TextAnchor.MiddleCenter);
+            PlaceBonusRow(_noBonusesText.rectTransform, 8, 32, 4);
+            _bonusContentParent.sizeDelta = V(0, rowY + 4);
         }
 
-        void AddBLine(RectTransform parent, ref float y, string label, string key)
+        void AddBLine(ref float y, string label, string key)
         {
-            var lbl = Txt(parent, label, 11, C_Dim, TextAnchor.MiddleLeft);
-            var lRT = lbl.rectTransform;
-            lRT.anchorMin = V(0, 1); lRT.anchorMax = V(0.65f, 1);
-            lRT.pivot = V(0, 1);
-            lRT.offsetMin = V(8, -(y + 14));
-            lRT.offsetMax = V(0, -y);
+            var row = Rect(_bonusContentParent, "Bonus_" + key.Replace(':', '_'));
+            PlaceBonusRow(row, y, 32, 2);
 
-            var val = Txt(parent, "\u2014", 11, Color.white, TextAnchor.MiddleRight);
+            var lbl = Txt(row, label, 15,
+                c(0.72f, 0.70f, 0.88f), TextAnchor.MiddleLeft);
+            var lRT = lbl.rectTransform;
+            lRT.anchorMin = V(0, 0); lRT.anchorMax = V(0.70f, 1);
+            lRT.offsetMin = V(10, 0); lRT.offsetMax = V(0, 0);
+
+            var val = Txt(row, "\u2014", 15, Color.white,
+                TextAnchor.MiddleRight);
             val.fontStyle = FontStyle.Bold;
             var vRT = val.rectTransform;
-            vRT.anchorMin = V(0.65f, 1); vRT.anchorMax = V(1, 1);
-            vRT.pivot = V(1, 1);
-            vRT.offsetMin = V(0, -(y + 14));
-            vRT.offsetMax = V(-8, -y);
+            vRT.anchorMin = V(0.70f, 0); vRT.anchorMax = V(1, 1);
+            vRT.offsetMin = V(0, 0); vRT.offsetMax = V(-10, 0);
 
-            _bonusRows.Add(new BonusRowUI { key = key, valueText = val });
-            y += 15;
+            _bonusRows.Add(new BonusRowUI
+            {
+                key = key,
+                root = row,
+                labelText = lbl,
+                valueText = val
+            });
+            row.gameObject.SetActive(false);
+            y += 38;
+        }
+
+        static void PlaceBonusRow(RectTransform rt, float y, float height,
+            float horizontalInset)
+        {
+            rt.anchorMin = V(0, 1); rt.anchorMax = V(1, 1);
+            rt.pivot = V(0.5f, 1);
+            rt.offsetMin = V(horizontalInset, -(y + height));
+            rt.offsetMax = V(-horizontalInset, -y);
         }
 
         void BonusPlace(RectTransform rt, float y, float h)
@@ -576,7 +769,8 @@ namespace ErenshorSkills
                 UpdCombat(_magicRows[i], info, C_Magic);
             }
 
-            foreach (var b in _bonusRows) UpdBonus(b);
+            var combatBonuses = Skills.CombatSkills.GetActiveCombatSkills();
+            RefreshBonusRows(combatBonuses);
         }
 
         void UpdRow(SkillRowUI r, SkillEntry s)
@@ -586,23 +780,20 @@ namespace ErenshorSkills
             if (!s.IsUnlocked)
             {
                 r.levelText.text = $"<color=#666666>0/{s.SkillCap}</color>";
-                r.barFill.anchorMax = V(0.002f, 1);
-                r.barFill.offsetMax = V(-1, -1);
+                SetProgressFill(r.barFill, 0f);
                 r.xpText.text = "";
             }
             else if (s.IsAtCap)
             {
                 r.levelText.text = $"{s.Level}/{s.SkillCap}";
-                r.barFill.anchorMax = V(1f, 1);
-                r.barFill.offsetMax = V(-1, -1);
+                SetProgressFill(r.barFill, 1f);
                 r.xpText.text = "";
             }
             else
             {
                 r.levelText.text = $"{s.Level}/{s.SkillCap}";
                 float f = Mathf.Clamp01(s.LevelProgress);
-                r.barFill.anchorMax = V(Mathf.Max(f, 0.002f), 1);
-                r.barFill.offsetMax = V(-1, -1);
+                SetProgressFill(r.barFill, f);
                 r.xpText.text = "";
             }
         }
@@ -618,8 +809,7 @@ namespace ErenshorSkills
                 r.levelText.text = $"<color=#666666>0/{s.SkillCap}</color>";
                 r.bonusText.text = "\u2014";
                 r.bonusText.color = Color.gray;
-                r.barFill.anchorMax = V(0.002f, 1);
-                r.barFill.offsetMax = V(-1, -1);
+                SetProgressFill(r.barFill, 0f);
                 r.hitsText.text = "";
             }
             else if (s.IsAtCap)
@@ -627,8 +817,7 @@ namespace ErenshorSkills
                 r.levelText.text = $"{s.Level}/{s.SkillCap}";
                 r.bonusText.text = info.Bonus > 0.01f ? $"+{info.Bonus:F1}%" : "\u2014";
                 r.bonusText.color = info.Bonus > 0.01f ? accent : Color.gray;
-                r.barFill.anchorMax = V(1f, 1);
-                r.barFill.offsetMax = V(-1, -1);
+                SetProgressFill(r.barFill, 1f);
                 r.hitsText.text = "";
             }
             else
@@ -637,8 +826,7 @@ namespace ErenshorSkills
                 r.bonusText.text = info.Bonus > 0.01f ? $"+{info.Bonus:F1}%" : "\u2014";
                 r.bonusText.color = info.Bonus > 0.01f ? accent : Color.gray;
                 float f = Mathf.Clamp01(s.LevelProgress);
-                r.barFill.anchorMax = V(Mathf.Max(f, 0.002f), 1);
-                r.barFill.offsetMax = V(-1, -1);
+                SetProgressFill(r.barFill, f);
                 r.hitsText.text = "";
             }
         }
@@ -677,23 +865,153 @@ namespace ErenshorSkills
             btn.gameObject.SetActive(canTrain);
         }
 
-        void UpdBonus(BonusRowUI b)
+        void RefreshBonusRows(
+            List<Skills.CombatSkills.CombatSkillInfo> combatBonuses)
         {
-            string v = "\u2014"; bool on = false;
-            switch (b.key) {
-                case "catch_bonus": on = SkillsPlugin.CfgEnableFishing.Value;
-                    if (on) v = $"+{Skills.FishingSkill.CatchBonus:F1}%"; break;
-                case "swim": on = SkillsPlugin.CfgEnableSwimming.Value;
-                    if (on) v = $"+{(Skills.SwimmingSkill.SpeedMultiplier-1f)*100f:F0}%"; break;
-                case "bind": on = SkillsPlugin.CfgEnableBindWound.Value;
-                    if (on) v = $"{Skills.BindWoundSkill.HealPercent:F1}% max HP"; break;
-                case "med": on = SkillsPlugin.CfgEnableMeditate.Value;
-                    if (on) v = $"+{Skills.MeditateSkill.BonusManaPerTick:F1}"; break;
-                case "food": on = SkillsPlugin.CfgEnableFoodTolerance.Value;
-                    if (on) v = $"+{Skills.FoodToleranceSkill.DurationBonus:F0}%"; break;
+            float y = 0f;
+            int visible = 0;
+            foreach (BonusRowUI row in _bonusRows)
+            {
+                if (!TryGetEarnedBonus(row, combatBonuses, out string value))
+                {
+                    if (row.root) row.root.gameObject.SetActive(false);
+                    continue;
+                }
+
+                row.root.gameObject.SetActive(true);
+                row.valueText.text = value;
+                row.valueText.color = Color.white;
+                PlaceBonusRow(row.root, y, 32, 2);
+                y += 38f;
+                visible++;
             }
-            b.valueText.text = on ? v : "\u2014";
-            b.valueText.color = on ? Color.white : Color.gray;
+
+            if (_noBonusesText)
+                _noBonusesText.gameObject.SetActive(visible == 0);
+            if (_bonusContentParent)
+                _bonusContentParent.sizeDelta = V(0,
+                    visible > 0 ? y + 4f : 48f);
+        }
+
+        bool TryGetEarnedBonus(BonusRowUI b,
+            List<Skills.CombatSkills.CombatSkillInfo> combatBonuses,
+            out string value)
+        {
+            value = "";
+            var data = SkillsSaveManager.Data;
+            switch (b.key) {
+                case "catch_bonus":
+                    if (SkillsPlugin.CfgEnableFishing.Value &&
+                        data.Fishing.Level > 0)
+                    {
+                        value = $"+{Skills.FishingSkill.CatchBonus:F1}%";
+                        return true;
+                    }
+                    return false;
+                case "forage_cooldown":
+                    if (SkillsPlugin.CfgEnableForaging.Value &&
+                        data.Foraging.Level > 0)
+                    {
+                        float cooldown = Mathf.Max(90f -
+                            data.Foraging.Level * 0.9f, 45f);
+                        value = $"{cooldown:F0}s";
+                        return true;
+                    }
+                    return false;
+                case "swim":
+                    if (SkillsPlugin.CfgEnableSwimming.Value &&
+                        data.Swimming.Level > 0)
+                    {
+                        value = $"+{(Skills.SwimmingSkill.SpeedMultiplier-1f)*100f:F0}%";
+                        return true;
+                    }
+                    return false;
+                case "bind":
+                    if (SkillsPlugin.CfgEnableBindWound.Value &&
+                        data.BindWound.Level > 0)
+                    {
+                        float cooldown = Mathf.Max(45f -
+                            data.BindWound.Level * 0.5f, 15f);
+                        value = $"{Skills.BindWoundSkill.HealPercent:F1}% / {cooldown:F0}s";
+                        return true;
+                    }
+                    return false;
+                case "med":
+                    if (SkillsPlugin.CfgEnableMeditate.Value &&
+                        data.Meditate.Level > 0)
+                    {
+                        value = $"+{Skills.MeditateSkill.BonusManaPerTick:F1}";
+                        return true;
+                    }
+                    return false;
+                case "food":
+                    if (SkillsPlugin.CfgEnableFoodTolerance.Value &&
+                        data.FoodTolerance.Level > 0)
+                    {
+                        value = $"+{Skills.FoodToleranceSkill.DurationBonus:F0}%";
+                        return true;
+                    }
+                    return false;
+                case "beg_chance":
+                    if (SkillsPlugin.CfgEnableBegging.Value &&
+                        data.Begging.Level > 0)
+                    {
+                        float chance = Mathf.Clamp((30f +
+                            data.Begging.Level * 1.2f) / 1.5f,
+                            5f, 95f);
+                        value = $"{chance:F0}%";
+                        return true;
+                    }
+                    return false;
+                case "magic:Evocation":
+                    if (SkillsPlugin.CfgEnableMagicSkills.Value &&
+                        data.Evocation.Level > 0)
+                    {
+                        value = $"+{(Skills.MagicSkills.GetSpellDamageMultiplier()-1f)*100f:F1}%";
+                        return true;
+                    }
+                    return false;
+                case "magic:Abjuration":
+                    if (SkillsPlugin.CfgEnableMagicSkills.Value &&
+                        data.Abjuration.Level > 0)
+                    {
+                        value = $"+{(Skills.MagicSkills.GetBuffDurationMultiplier()-1f)*100f:F1}%";
+                        return true;
+                    }
+                    return false;
+                case "magic:Alteration":
+                    if (SkillsPlugin.CfgEnableMagicSkills.Value &&
+                        data.Alteration.Level > 0)
+                    {
+                        value = $"+{(Skills.MagicSkills.GetHealMultiplier()-1f)*100f:F1}%";
+                        return true;
+                    }
+                    return false;
+                case "magic:Conjuration":
+                    if (SkillsPlugin.CfgEnableMagicSkills.Value &&
+                        data.Conjuration.Level > 0)
+                    {
+                        value = $"+{(Skills.MagicSkills.GetConjurationMultiplier()-1f)*100f:F1}%";
+                        return true;
+                    }
+                    return false;
+                default:
+                    if (b.key.StartsWith("combat:",
+                        StringComparison.Ordinal) &&
+                        SkillsPlugin.CfgEnableCombatSkills.Value)
+                    {
+                        string name = b.key.Substring("combat:".Length);
+                        foreach (var info in combatBonuses)
+                            if (string.Equals(info.Name, name,
+                                StringComparison.Ordinal) &&
+                                info.Skill != null && info.Skill.Level > 0)
+                            {
+                                value = $"+{info.Bonus:F1}%";
+                                return true;
+                            }
+                    }
+                    return false;
+            }
         }
 
         // ══════════════════════════════════════════════════════════════
@@ -703,7 +1021,6 @@ namespace ErenshorSkills
         void SetVis(bool v)
         {
             if (_canvasGO) _canvasGO.SetActive(v);
-            if (!v) { try { GameData.PlayerTyping = false; } catch { } }
         }
 
         // ══════════════════════════════════════════════════════════════
@@ -735,19 +1052,27 @@ namespace ErenshorSkills
             return img;
         }
 
-        static Text Txt(Transform parent, string text, int size,
+        static TextMeshProUGUI Txt(Transform parent, string text, int size,
             Color color, TextAnchor anchor)
         {
             var rt = Rect(parent, "T");
-            var t = rt.gameObject.AddComponent<Text>();
+            var t = rt.gameObject.AddComponent<TextMeshProUGUI>();
             t.text = text;
-            t.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
-            t.fontSize = size; t.color = color; t.alignment = anchor;
-            t.supportRichText = true;
-            t.horizontalOverflow = HorizontalWrapMode.Overflow;
-            t.verticalOverflow = VerticalWrapMode.Overflow;
-            t.raycastTarget = false;
+            t.fontSize = size; t.color = color;
+            t.alignment = ToTmpAlignment(anchor);
+            NativeUiStyle.Apply(t);
             return t;
+        }
+
+        static TextAlignmentOptions ToTmpAlignment(TextAnchor anchor)
+        {
+            switch (anchor)
+            {
+                case TextAnchor.MiddleLeft: return TextAlignmentOptions.MidlineLeft;
+                case TextAnchor.MiddleRight: return TextAlignmentOptions.MidlineRight;
+                case TextAnchor.UpperLeft: return TextAlignmentOptions.TopLeft;
+                default: return TextAlignmentOptions.Center;
+            }
         }
 
         static void Fill(RectTransform rt)
@@ -780,34 +1105,39 @@ namespace ErenshorSkills
         // ── Data structs ──────────────────────────────────────────────
 
         class SkillRowUI {
-            public Text nameText, levelText, xpText;
+            public TextMeshProUGUI nameText, levelText, xpText;
             public RectTransform barFill;
             public Button trainBtn;
             public SkillEntry skill;
         }
         class CombatRowUI {
-            public Text nameText, levelText, bonusText, hitsText;
+            public TextMeshProUGUI nameText, levelText, bonusText, hitsText;
             public RectTransform barFill;
             public Button trainBtn;
             public SkillEntry skill;
         }
-        class BonusRowUI { public string key; public Text valueText; }
+        class BonusRowUI
+        {
+            public string key;
+            public RectTransform root;
+            public TextMeshProUGUI labelText, valueText;
+        }
 
         // ── Tooltip system ────────────────────────────────────────────
 
         static GameObject _tooltipGO;
-        static Text _tooltipText;
+        static TextMeshProUGUI _tooltipText;
         static RectTransform _tooltipRT;
 
         static readonly Dictionary<string, string> SkillTooltips = new Dictionary<string, string>
         {
             // Utility
             {"Fishing", "Levels from catching fish.\nHigher skill = more nibbles per cast = better catch rate.\nAlso awards Raw Fish, Moongill Trout, and Golden Carp for Baking recipes."},
-            {"Foraging", "Press F9 to search the ground for herbs, roots, and materials.\nHigher skill unlocks rarer finds and reduces failures."},
+            {"Foraging", "Search the ground for herbs, roots, and materials.\nHigher skill unlocks rarer finds and reduces failures."},
             {"Swimming", "Levels up by swimming in water while moving.\n+0.3% swim speed per level."},
-            {"Bind Wound", "Press F10 to heal out of combat.\n+0.15% max HP healed per level."},
-            {"Meditate", "Press M to sit and regenerate mana.\nWorks in combat. Higher skill = faster mana regen."},
-            {"Food Tolerance", "Levels when you consume food or drink buffs.\n+0.5% buff duration per level."},
+            {"Bind Wound", "Heal yourself out of combat with Patchwork Bandages.\n+0.15% max HP healed per level."},
+            {"Meditate", "Sit safely out of combat to regenerate extra mana.\nCasting, taking damage, typing, or entering combat pauses meditation."},
+            {"Food Tolerance", "Levels when you consume food or drink buffs.\n+0.556% buff duration per level."},
             {"Begging", "Press ; to ask nearby NPCs for handouts.\nCan receive gold, items, or lore tidbits."},
             // Combat
             {"1H Slashing", "Swords, scimitars, axes.\n+0.085% melee damage per level.\nLevels from landing hits with 1H slashing weapons."},
@@ -829,8 +1159,94 @@ namespace ErenshorSkills
             {"Evocation", "Direct damage spells (nukes, AE, PBAE).\n+0.08% spell damage per level.\nMax bonus: +14.4% at skill 180."},
             {"Abjuration", "Buff and ward spells.\n+0.3% buff duration per level.\nMax bonus: +54% at skill 180."},
             {"Alteration", "Healing spells.\n+0.08% heal amount per level.\nMax bonus: +14.4% at skill 180."},
-            {"Conjuration", "DoTs, pets, and status effects.\n+0.08% DoT damage per level.\nMax bonus: +14.4% at skill 180."},
+            {"Conjuration", "Pet-summoning, DoT, and status-effect spells.\n+0.08% DoT and summoned-pet damage per level.\nMax bonus: +14.4% at skill 180."},
         };
+
+        static bool TryGetSkillTooltip(string skillName, out string description)
+        {
+            if (!SkillTooltips.TryGetValue(skillName, out description))
+                return false;
+
+            if (skillName == "Foraging")
+            {
+                KeyCode key = SkillsPlugin.CfgForageKey?.Value ?? KeyCode.F9;
+                string input = key == KeyCode.None
+                    ? "Click the leaf icon beside the Skills button"
+                    : $"Press {UtilityActionBar.FormatKeyForDisplay(key)} or click the leaf icon beside the Skills button";
+                description = $"{input} to search the ground for herbs, roots, and materials.\n" +
+                    "Higher skill unlocks rarer finds and reduces failures.";
+                return true;
+            }
+            if (skillName == "Bind Wound")
+            {
+                KeyCode key = SkillsPlugin.CfgBindWoundKey?.Value ?? KeyCode.F10;
+                string input = key == KeyCode.None
+                    ? "Click the bandage icon beside the Skills button"
+                    : $"Press {UtilityActionBar.FormatKeyForDisplay(key)} or click the bandage icon beside the Skills button";
+                description = $"{input} to heal out of combat with Patchwork Bandages.\n" +
+                    "+0.15% max HP healed per level.";
+                return true;
+            }
+            if (skillName == "Begging")
+            {
+                KeyCode key = SkillsPlugin.CfgBegKey?.Value ?? KeyCode.Semicolon;
+                string input = key == KeyCode.None
+                    ? "Click the coin icon beside the Skills button"
+                    : $"Press {UtilityActionBar.FormatKeyForDisplay(key)} or click the coin icon beside the Skills button";
+                description = input + " to ask a nearby targeted NPC for handouts.\n" +
+                    "Can receive gold, items, or lore tidbits.";
+                return true;
+            }
+
+            float combatPerLevel = Mathf.Max(0f,
+                SkillsPlugin.CfgCombatSkillDamagePerLevel?.Value ?? 0.085f);
+            switch (skillName)
+            {
+                case "1H Slashing": case "1H Blunt": case "Piercing":
+                case "2H Slashing": case "2H Blunt": case "Archery":
+                case "Wands": case "Hand to Hand":
+                    description = description.Replace("+0.085%",
+                        $"+{combatPerLevel:0.###}%");
+                    return true;
+            }
+
+            int maxLevel = Mathf.Max(1,
+                SkillsPlugin.CfgGlobalMaxLevel?.Value ?? 180);
+            float perLevel;
+            string purpose;
+            switch (skillName)
+            {
+                case "Evocation":
+                    perLevel = Mathf.Max(0f,
+                        SkillsPlugin.CfgEvocationDamagePerLevel?.Value ?? 0.0008f) * 100f;
+                    purpose = "spell damage";
+                    break;
+                case "Abjuration":
+                    perLevel = Mathf.Max(0f,
+                        SkillsPlugin.CfgAbjurationDurationPerLevel?.Value ?? 0.003f) * 100f;
+                    purpose = "buff duration";
+                    break;
+                case "Alteration":
+                    perLevel = Mathf.Max(0f,
+                        SkillsPlugin.CfgAlterationHealPerLevel?.Value ?? 0.0008f) * 100f;
+                    purpose = "heal amount";
+                    break;
+                case "Conjuration":
+                    perLevel = Mathf.Max(0f,
+                        SkillsPlugin.CfgConjurationDamagePerLevel?.Value ?? 0.0008f) * 100f;
+                    purpose = "DoT and summoned-pet damage";
+                    break;
+                default:
+                    return true;
+            }
+
+            int firstBreak = description.IndexOf('\n');
+            string firstLine = firstBreak >= 0
+                ? description.Substring(0, firstBreak) : description;
+            description = $"{firstLine}\n+{perLevel:0.###}% {purpose} per level." +
+                $"\nMax bonus: +{perLevel * maxLevel:0.#}% at skill {maxLevel}.";
+            return true;
+        }
 
         void BuildTooltip()
         {
@@ -849,8 +1265,8 @@ namespace ErenshorSkills
 
             _tooltipText = Txt(_tooltipRT, "", 11, c(0.85f, 0.85f, 0.85f),
                 TextAnchor.UpperLeft);
-            _tooltipText.horizontalOverflow = HorizontalWrapMode.Wrap;
-            _tooltipText.verticalOverflow = VerticalWrapMode.Overflow;
+            _tooltipText.enableWordWrapping = true;
+            _tooltipText.overflowMode = TextOverflowModes.Overflow;
             _tooltipText.rectTransform.anchorMin = V(0, 0);
             _tooltipText.rectTransform.anchorMax = V(1, 1);
             _tooltipText.rectTransform.offsetMin = V(8, 6);
@@ -908,7 +1324,7 @@ namespace ErenshorSkills
             if (hoveredSkill != _lastTooltipSkill)
             {
                 string desc;
-                if (!SkillTooltips.TryGetValue(hoveredSkill, out desc))
+                if (!TryGetSkillTooltip(hoveredSkill, out desc))
                 {
                     _tooltipGO.SetActive(false); _lastTooltipSkill = ""; return;
                 }
@@ -954,10 +1370,20 @@ namespace ErenshorSkills
         class InputBlocker : MonoBehaviour,
             IPointerEnterHandler, IPointerExitHandler
         {
+            bool _inside;
             public void OnPointerEnter(PointerEventData e)
-            { try { GameData.PlayerTyping = true; } catch { } }
+            {
+                if (_inside) return;
+                _inside = true;
+                AddonInputState.Enter();
+            }
             public void OnPointerExit(PointerEventData e)
-            { try { GameData.PlayerTyping = false; } catch { } }
+            {
+                if (!_inside) return;
+                _inside = false;
+                AddonInputState.Exit();
+            }
+            void OnDisable() { if (_inside) OnPointerExit(null); }
         }
 
         class WindowDragger : MonoBehaviour,

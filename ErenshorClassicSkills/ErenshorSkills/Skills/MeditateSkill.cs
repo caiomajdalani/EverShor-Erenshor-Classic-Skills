@@ -11,20 +11,24 @@ namespace ErenshorSkills.Skills
     /// MMO lexicon permanently.
     ///
     /// In Erenshor, all classes use mana. This skill:
-    /// - Toggle on/off with the hotkey (must be sitting)
+    /// - Activates automatically while sitting out of combat
     /// - While meditating, mana regen rate increases based on skill level
     /// - XP awarded periodically while meditating
-    /// - Moving cancels meditation
-    /// - At level 30+: Meditation works at a reduced rate while standing
+    /// - Standing, casting, taking damage, or entering combat cancels meditation
     /// </summary>
     public static class MeditateSkill
     {
         private static bool _isMeditating = false;
         private static float _lastMedTick = 0f;
         private static float _tickInterval = 3f;
-        private static Vector3 _medStartPos;
 
         public static bool IsMeditating => _isMeditating;
+
+        internal static void ResetRuntime()
+        {
+            _isMeditating = false;
+            _lastMedTick = 0f;
+        }
 
         /// <summary>Extra mana per regen tick while meditating.</summary>
         public static float BonusManaPerTick
@@ -32,58 +36,23 @@ namespace ErenshorSkills.Skills
             get
             {
                 float baseMana = SkillsPlugin.CfgMeditateBaseMana.Value;
-                return baseMana + SkillsSaveManager.Data.Meditate.Level * 0.556f;
+                return Mathf.Clamp(baseMana +
+                    SkillsSaveManager.Data.Meditate.Level * 0.556f, 0f, 10000f);
             }
         }
 
         public static void ToggleMeditate()
         {
             if (!SkillsPlugin.CfgEnableMeditate.Value) return;
-
-            if (_isMeditating)
-            {
-                StopMeditating("You stop meditating.");
-                return;
-            }
-
-            // Meditation works while sitting, even in combat
-
-            // Check if mana is already full
-            try
-            {
-                var stats = GameData.PlayerStats;
-                if (stats != null && stats.CurrentMana >= stats.GetCurrentMaxMana())
-                {
-                    ChatHelper.Send(
-                        $"<color=#CE93D8>[Meditate]</color> " +
-                        $"Your mana is already full.");
-                    return;
-                }
-            }
-            catch { }
-
-            _isMeditating = true;
-            _lastMedTick = Time.time;
-
-            try
-            {
-                _medStartPos = GameData.PlayerControl.transform.position;
-            }
-            catch
-            {
-                _medStartPos = Vector3.zero;
-            }
-
             ChatHelper.Send(
                 $"<color=#CE93D8>[Meditate]</color> " +
-                $"You begin meditating... " +
-                $"<color=#AAAAAA>(+{BonusManaPerTick:F1} mana/tick)</color>");
+                $"Meditation activates automatically while sitting out of combat.");
         }
 
         /// <summary>
         /// Called every frame by Patch_MeditationTick.
-        /// Detects the game's native meditation state (RecentCast and RecentDmg <= 0)
-        /// and awards bonus mana + XP during it. Also works with manual toggle via M key.
+        /// Detects the game's native sitting/rest state and awards bonus mana + XP
+        /// only when the player is safely resting out of combat.
         /// </summary>
         public static void ProcessTick()
         {
@@ -100,8 +69,20 @@ namespace ErenshorSkills.Skills
                 }
                 catch { }
 
-                bool shouldMed = _isMeditating || isSitting;
-                if (!shouldMed) return;
+                bool canMeditate = isSitting && !GameData.InCombat &&
+                    !GameData.PlayerTyping &&
+                    stats.RecentDmg <= 0f && stats.RecentCast <= 0f;
+                if (!canMeditate)
+                {
+                    _isMeditating = false;
+                    return;
+                }
+
+                if (!_isMeditating)
+                {
+                    _isMeditating = true;
+                    _lastMedTick = Time.time;
+                }
 
                 // Only active while mana is recovering — no XP or bonus at full mana
                 if (stats.CurrentMana >= stats.GetCurrentMaxMana()) return;
@@ -119,19 +100,14 @@ namespace ErenshorSkills.Skills
                     stats.GetCurrentMaxMana());
 
                 // Only gain skill XP while actively recovering mana
-                SkillXpEngine.AwardXp(skill, 3f, showChat: false);
                 skill.TimesUsed++;
+                SkillXpEngine.AwardXp(skill, 3f, showChat: false);
             }
-            catch { }
+            catch
+            {
+                _isMeditating = false;
+            }
         }
 
-        private static void StopMeditating(string reason)
-        {
-            _isMeditating = false;
-            if (SkillsPlugin.CfgShowChatMessages.Value)
-                ChatHelper.Send(
-                    $"<color=#CE93D8>[Meditate]</color> " +
-                    $"<color=#AAAAAA>{reason}</color>");
-        }
     }
 }

@@ -4,6 +4,8 @@ using System.Linq;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
+using TMPro;
+using FontStyle = TMPro.FontStyles;
 
 namespace ErenshorSkills.UI
 {
@@ -20,6 +22,8 @@ namespace ErenshorSkills.UI
         static int _selectedRecipeIndex = -1;
         static string _searchText = "";
         static bool _showOnlyAvailable = false;
+        static bool _qaShowAllRecipes;
+        static bool _qaScrollBottomPending;
         static bool _isCombining;
         static float _combineStartTime;
         const float COMBINE_DUR = 2.5f;
@@ -31,21 +35,26 @@ namespace ErenshorSkills.UI
         // uGUI references
         GameObject _canvasGO;
         RectTransform _windowPanel;
+        RectTransform _leftPage;
+        RectTransform _rightPage;
         ScrollRect _recipeScroll;
+        Scrollbar _recipeScrollbar;
         RectTransform _recipeContent;
         RectTransform _detailPanel;
-        Text _titleText, _skillLevelText, _combineStatusText, _footerText;
-        Text _detailName, _detailDesc, _detailReqSkill, _detailTrivial;
-        Text _detailChance, _detailValue;
+        TextMeshProUGUI _titleText, _skillLevelText, _combineStatusText, _footerText;
+        TextMeshProUGUI _detailName, _detailDesc, _detailReqSkill, _detailTrivial;
+        TextMeshProUGUI _detailChance, _detailValue;
         Image _detailIcon;
         RectTransform _detailIconRT;
         RectTransform _xpBarFill, _combineBarFill;
-        Text _xpBarText, _combineBarText;
+        TextMeshProUGUI _xpBarText, _combineBarText;
         Button _combineBtn;
-        Text _combineBtnText;
+        TextMeshProUGUI _combineBtnText;
         Button _deconBtn;
-        Text _deconBtnText;
-        InputField _searchField;
+        TextMeshProUGUI _deconBtnText;
+        TMP_InputField _searchField;
+        Image _craftableToggleImage;
+        TextMeshProUGUI _craftableToggleLabel;
 
         RectTransform _matsContainer;
         bool _built;
@@ -63,7 +72,9 @@ namespace ErenshorSkills.UI
         static readonly Color C_Red    = c(0.94f, 0.33f, 0.31f);
         static Color c(float r, float g, float b, float a = 1) => new Color(r, g, b, a);
 
-        const float W = 500, H = 560, TITLE_H = 30, PAD = 6;
+        const float W = 610, H = 620, TITLE_H = 58, PAD = 6;
+        const float MAX_STATION_DIST = 5f;
+        static Vector3 _openPosition;
 
         // ══════════════════════════════════════════════════════════
         // PUBLIC API
@@ -80,16 +91,18 @@ namespace ErenshorSkills.UI
 
             if (_showWindow && _activeTradeskill == tradeskillName)
             {
-                _showWindow = false;
-                _instance.SetVis(false);
+                Close();
                 return;
             }
 
+            _qaShowAllRecipes = false;
+            _qaScrollBottomPending = false;
             _activeTradeskill = tradeskillName;
             _showWindow = true;
             _selectedRecipeIndex = -1;
             _searchText = "";
             _isCombining = false;
+            try { _openPosition = GameData.PlayerControl.transform.position; } catch { }
             RefreshRecipeList();
             _instance.SetVis(true);
             if (_instance._built)
@@ -104,8 +117,81 @@ namespace ErenshorSkills.UI
         public static void Close()
         {
             _showWindow = false;
+            _qaShowAllRecipes = false;
+            _qaScrollBottomPending = false;
             _isCombining = false;
             if (_instance) _instance.SetVis(false);
+        }
+
+        /// <summary>
+        /// Opens a non-persistent QA preview with the full recipe list visible,
+        /// selects a real row through the same state used by its click handler,
+        /// and optionally moves the real ScrollRect to its bottom boundary.
+        /// No recipe knowledge or inventory state is changed.
+        /// </summary>
+        internal static bool OpenQaPreview(string tradeskillName,
+            bool bottom, out string detail)
+        {
+            detail = null;
+            if (SkillsPlugin.CfgEnableTestMode?.Value != true)
+            {
+                detail = "test mode is disabled";
+                return false;
+            }
+
+            if (_showWindow) Close();
+            Open(tradeskillName);
+            _qaShowAllRecipes = true;
+            RefreshRecipeList();
+            if (_filtered.Count <= 0)
+            {
+                detail = $"no {tradeskillName} recipes were available";
+                return false;
+            }
+
+            _selectedRecipeIndex = bottom ? _filtered.Count - 1 : 0;
+            _qaScrollBottomPending = bottom;
+            if (_instance && _instance._built)
+            {
+                _instance.ClearRecipeRows();
+                _instance.Refresh();
+            }
+            detail = $"{tradeskillName}: selected " +
+                $"'{_filtered[_selectedRecipeIndex].Name}' at " +
+                $"{(bottom ? "bottom" : "top")} of {_filtered.Count} recipes";
+            return true;
+        }
+
+        public static void Shutdown()
+        {
+            _showWindow = false;
+            _isCombining = false;
+            _filtered.Clear();
+            _selectedRecipeIndex = -1;
+            _searchText = "";
+            _showOnlyAvailable = false;
+            _qaShowAllRecipes = false;
+            _qaScrollBottomPending = false;
+
+            var instance = _instance;
+            _instance = null;
+            if (instance)
+                UnityEngine.Object.Destroy(instance.gameObject);
+
+            foreach (var sprite in _ownedIconSprites)
+            {
+                if (!sprite) continue;
+                var texture = sprite.texture;
+                UnityEngine.Object.Destroy(sprite);
+                if (texture) UnityEngine.Object.Destroy(texture);
+            }
+            _ownedIconSprites.Clear();
+            _iconCache.Clear();
+            _iconDir = null;
+            if (_ws) UnityEngine.Object.Destroy(_ws);
+            if (_wt) UnityEngine.Object.Destroy(_wt);
+            _ws = null;
+            _wt = null;
         }
 
         public static bool IsOpen => _showWindow;
@@ -116,13 +202,63 @@ namespace ErenshorSkills.UI
 
         void Start()
         {
-            try { Build(); _built = true; SetVis(false); }
+            TryBuildWhenNativeUiIsReady();
+            UnityEngine.SceneManagement.SceneManager.sceneLoaded += OnSceneLoaded;
+        }
+
+        void TryBuildWhenNativeUiIsReady()
+        {
+            if (_built || !NativeEventSystemGate.IsReady) return;
+            try
+            {
+                Build();
+                _built = true;
+                SetVis(_showWindow);
+                if (_showWindow)
+                    Refresh();
+            }
             catch (Exception ex) { SkillsPlugin.Log.LogError($"TradeskillWindow build: {ex}"); }
+        }
+
+        void OnSceneLoaded(UnityEngine.SceneManagement.Scene scene, UnityEngine.SceneManagement.LoadSceneMode mode)
+        {
+            if (_showWindow) Close();
         }
 
         void LateUpdate()
         {
+            if (!_built) TryBuildWhenNativeUiIsReady();
             if (!_built || !_showWindow || !_canvasGO || !_canvasGO.activeSelf) return;
+
+            // Close if player moved too far from where they opened
+            try
+            {
+                if (GameData.PlayerControl != null)
+                {
+                    float dist = Vector3.Distance(
+                        GameData.PlayerControl.transform.position, _openPosition);
+                    if (dist > MAX_STATION_DIST)
+                    {
+                        ChatHelper.Send(
+                            "<color=#FF9800>[Tradeskills]</color> " +
+                            "You moved too far from the station.");
+                        Close();
+                        return;
+                    }
+                }
+                else
+                {
+                    // Player control is null — character exited or scene changed
+                    Close();
+                    return;
+                }
+            }
+            catch
+            {
+                // If anything fails checking player, close to be safe
+                Close();
+                return;
+            }
 
             // Escape key closes the window
             if (Input.GetKeyDown(KeyCode.Escape))
@@ -138,9 +274,20 @@ namespace ErenshorSkills.UI
             }
 
             Refresh();
+            if (_qaScrollBottomPending && _recipeScroll)
+            {
+                Canvas.ForceUpdateCanvases();
+                _recipeScroll.verticalNormalizedPosition = 0f;
+                _qaScrollBottomPending = false;
+            }
         }
 
-        void OnDestroy() { if (_canvasGO) Destroy(_canvasGO); }
+        void OnDestroy()
+        {
+            if (_canvasGO) Destroy(_canvasGO);
+            UnityEngine.SceneManagement.SceneManager.sceneLoaded -= OnSceneLoaded;
+            if (ReferenceEquals(_instance, this)) _instance = null;
+        }
 
         // ══════════════════════════════════════════════════════════
         // BUILD — construct the entire uGUI hierarchy
@@ -148,15 +295,6 @@ namespace ErenshorSkills.UI
 
         void Build()
         {
-            // Reuse existing EventSystem if present
-            if (!FindObjectOfType<EventSystem>())
-            {
-                var es = new GameObject("CS_TS_ES");
-                es.AddComponent<EventSystem>();
-                es.AddComponent<StandaloneInputModule>();
-                DontDestroyOnLoad(es);
-            }
-
             _canvasGO = new GameObject("CS_TS_Canvas");
             DontDestroyOnLoad(_canvasGO);
             var cv = _canvasGO.AddComponent<Canvas>();
@@ -168,133 +306,138 @@ namespace ErenshorSkills.UI
             sc.matchWidthOrHeight = 0.5f;
             _canvasGO.AddComponent<GraphicRaycaster>();
 
-            // Window panel
-            _windowPanel = MkRect(_canvasGO.transform, "Win");
-            MkImg(_windowPanel, C_WinBg);
+            // Two native carved pages, matching Erenshor's Skills/Spells book.
+            _windowPanel = MkRect(_canvasGO.transform, "TradeskillBook");
+            MkImg(_windowPanel, Color.clear);
             _windowPanel.anchorMin = V(0, 1); _windowPanel.anchorMax = V(0, 1);
             _windowPanel.pivot = V(0, 1);
-            _windowPanel.anchoredPosition = V(420, -60);
+            _windowPanel.anchoredPosition = V(340, -80);
             _windowPanel.sizeDelta = V(W, H);
-            _windowPanel.gameObject.AddComponent<Outline>().effectColor = C_Border;
-            _windowPanel.gameObject.GetComponent<Outline>().effectDistance = new Vector2(1.5f, -1.5f);
             _windowPanel.gameObject.AddComponent<InputBlocker>();
 
-            // Title bar
-            var titleRT = MkRect(_windowPanel, "Title");
-            MkImg(titleRT, C_Title);
+            _leftPage = BuildNativePage(_windowPanel, "RecipePage", 0f);
+            _rightPage = BuildNativePage(_windowPanel, "DetailPage", 310f);
+
+            // Native books place title text directly on the carved page. Escape
+            // closes this window just like Erenshor's other modal windows.
+            var titleRT = MkRect(_rightPage, "TitleDrag");
+            MkImg(titleRT, Color.clear);
             StretchH(titleRT, 0, TITLE_H);
             titleRT.gameObject.AddComponent<WindowDragger>().target = _windowPanel;
-            // Border line at bottom of title
-            var titleBorder = MkRect(titleRT, "TBorder");
-            MkImg(titleBorder, C_Border);
-            titleBorder.anchorMin = V(0, 0); titleBorder.anchorMax = V(1, 0);
-            titleBorder.pivot = V(0.5f, 0); titleBorder.sizeDelta = V(0, 1);
-            titleBorder.anchoredPosition = V(0, 0);
 
-            // Close button FIRST
-            var clRT = MkRect(titleRT, "Close");
-            var clImg = MkImg(clRT, c(0.6f, 0.15f, 0.15f, 0.9f));
-            clRT.anchorMin = V(1, 0.5f); clRT.anchorMax = V(1, 0.5f);
-            clRT.pivot = V(1, 0.5f);
-            clRT.anchoredPosition = V(-4, 0); clRT.sizeDelta = V(28, 28);
-            var btn = clRT.gameObject.AddComponent<Button>();
-            btn.targetGraphic = clImg;
-            var colors = btn.colors;
-            colors.normalColor = c(0.6f, 0.15f, 0.15f, 0.9f);
-            colors.highlightedColor = c(0.8f, 0.2f, 0.2f, 1f);
-            colors.pressedColor = c(0.4f, 0.1f, 0.1f, 1f);
-            btn.colors = colors;
-            btn.onClick.AddListener(() => {
-                SkillsPlugin.Log.LogInfo("TradeskillWindow: Close button clicked");
-                Close();
-            });
-            btn.navigation = new Navigation { mode = Navigation.Mode.None };
-            var ct = MkTxt(clRT, "\u2715", 12, Color.white, TextAnchor.MiddleCenter);
-            ct.fontStyle = FontStyle.Bold; Fill(ct.rectTransform);
-
-            // Title text AFTER close button
-            _titleText = MkTxt(titleRT, "Tradeskill", 16, Color.white, TextAnchor.MiddleCenter);
+            _titleText = MkTxt(titleRT, "Tradeskill", 30, Color.white,
+                TextAnchor.MiddleCenter);
             _titleText.fontStyle = FontStyle.Bold;
-            _titleText.rectTransform.anchorMin = V(0, 0);
-            _titleText.rectTransform.anchorMax = V(1, 1);
-            _titleText.rectTransform.offsetMin = V(8, 0);
-            _titleText.rectTransform.offsetMax = V(-30, 0);
+            Fill(_titleText.rectTransform);
             _titleText.raycastTarget = false;
 
-            // Skill level label (right side of title)
-            _skillLevelText = MkTxt(titleRT, "", 11, C_Accent, TextAnchor.MiddleRight);
-            _skillLevelText.rectTransform.anchorMin = V(0.6f, 0);
-            _skillLevelText.rectTransform.anchorMax = V(0.92f, 1);
-            _skillLevelText.rectTransform.offsetMin = Vector2.zero;
-            _skillLevelText.rectTransform.offsetMax = Vector2.zero;
+            var recipeTitle = MkTxt(_leftPage, "Recipes", 30, Color.white,
+                TextAnchor.MiddleCenter);
+            recipeTitle.fontStyle = FontStyle.Bold;
+            StretchH(recipeTitle.rectTransform, 0, TITLE_H);
+            recipeTitle.raycastTarget = false;
 
-            float y = TITLE_H + 2;
+            var closeRT = MkRect(_rightPage, "Close");
+            var closeImage = MkImg(closeRT, c(0.72f, 0.16f, 0.16f, 0.95f));
+            NativeUiStyle.Apply(closeImage, NativeUiStyle.Role.Button,
+                c(0.72f, 0.16f, 0.16f, 0.95f));
+            closeImage.color = c(0.72f, 0.16f, 0.16f, 0.95f);
+            closeRT.anchorMin = V(1, 1); closeRT.anchorMax = V(1, 1);
+            closeRT.pivot = V(1, 1);
+            closeRT.anchoredPosition = V(-6, -6);
+            closeRT.sizeDelta = V(28, 24);
+            var closeButton = closeRT.gameObject.AddComponent<Button>();
+            closeButton.targetGraphic = closeImage;
+            closeButton.navigation = new Navigation { mode = Navigation.Mode.None };
+            closeButton.onClick.AddListener(Close);
+            var closeText = MkTxt(closeRT, "X", 15, Color.white,
+                TextAnchor.MiddleCenter);
+            closeText.fontStyle = FontStyle.Bold;
+            Fill(closeText.rectTransform);
 
-            // XP bar
-            var xpBg = MkRect(_windowPanel, "XPBg");
-            MkImg(xpBg, C_BarBg); StretchH(xpBg, y, 14, 6, 6);
-            _xpBarFill = MkRect(xpBg, "XPFill");
-            MkImg(_xpBarFill, C_Accent * 0.7f).raycastTarget = false;
-            _xpBarFill.anchorMin = V(0, 0); _xpBarFill.anchorMax = V(0, 1);
-            _xpBarFill.pivot = V(0, 0.5f);
-            _xpBarFill.offsetMin = V(1, 1); _xpBarFill.offsetMax = V(0, -1);
+            _skillLevelText = MkTxt(_rightPage, "", 15,
+                c(0.62f, 0.74f, 0.77f), TextAnchor.MiddleCenter);
+            StretchH(_skillLevelText.rectTransform, 43, 24, 12, 12);
+
+            float y = TITLE_H + 10;
+
+            // Native XP frame on the right page.
+            var xpBg = MkRect(_rightPage, "XPBg");
+            var xpImage = MkImg(xpBg, C_BarBg);
+            NativeUiStyle.Apply(xpImage, NativeUiStyle.Role.Progress, C_BarBg);
+            StretchH(xpBg, y, 24, 12, 12);
+            _xpBarFill = CreateProgressFill(xpBg, "XPFill",
+                C_Accent * 0.7f, 6, 7);
             _xpBarText = MkTxt(xpBg, "", 9, Color.white, TextAnchor.MiddleCenter);
             _xpBarText.fontStyle = FontStyle.Bold; Fill(_xpBarText.rectTransform);
-            y += 18;
+            y += 30;
 
-            // Search bar row
-            var searchRow = MkRect(_windowPanel, "Search");
-            StretchH(searchRow, y, 22, 6, 6);
+            // Search and filter live on the left recipe page.
+            var searchRow = MkRect(_leftPage, "Search");
+            StretchH(searchRow, y, 28, 12, 12);
 
             // Search input field
             var sfRT = MkRect(searchRow, "SF");
-            sfRT.anchorMin = V(0, 0); sfRT.anchorMax = V(0.75f, 1);
+            sfRT.anchorMin = V(0, 0); sfRT.anchorMax = V(0.67f, 1);
             sfRT.offsetMin = V(0, 0); sfRT.offsetMax = V(-4, 0);
-            MkImg(sfRT, c(0.10f, 0.16f, 0.22f, 0.8f));
-            _searchField = sfRT.gameObject.AddComponent<InputField>();
-            var sfText = MkTxt(sfRT, "", 11, Color.white, TextAnchor.MiddleLeft);
+            var searchImage = MkImg(sfRT, c(0.10f, 0.16f, 0.22f, 0.8f));
+            NativeUiStyle.Apply(searchImage, NativeUiStyle.Role.Input,
+                c(0.10f, 0.16f, 0.22f, 0.8f));
+            _searchField = sfRT.gameObject.AddComponent<TMP_InputField>();
+            var sfText = MkTxt(sfRT, "", 14, Color.white, TextAnchor.MiddleLeft);
             sfText.rectTransform.offsetMin = V(4, 0); sfText.rectTransform.offsetMax = V(-4, 0);
             Fill(sfText.rectTransform);
             sfText.rectTransform.offsetMin = V(4, 0);
             _searchField.textComponent = sfText;
-            _searchField.onValueChanged.AddListener(s => { _searchText = s; RefreshRecipeList(); if (_built) Refresh(); });
+            _searchField.onValueChanged.AddListener(s =>
+            {
+                _searchText = s;
+                RefreshRecipeList();
+                if (_built) Refresh();
+            });
 
             // Placeholder
-            var phText = MkTxt(sfRT, "Search recipes...", 11, C_Dim, TextAnchor.MiddleLeft);
+            var phText = MkTxt(sfRT, "Search recipes...", 13, C_Dim, TextAnchor.MiddleLeft);
             Fill(phText.rectTransform); phText.rectTransform.offsetMin = V(4, 0);
             _searchField.placeholder = phText;
 
             // Craftable toggle
             var togRT = MkRect(searchRow, "Tog");
-            togRT.anchorMin = V(0.76f, 0); togRT.anchorMax = V(1, 1);
+            togRT.anchorMin = V(0.68f, 0); togRT.anchorMax = V(1, 1);
             togRT.offsetMin = Vector2.zero; togRT.offsetMax = Vector2.zero;
-            var togLabel = MkTxt(togRT, "Craftable", 10, C_Dim, TextAnchor.MiddleCenter);
-            Fill(togLabel.rectTransform);
-            y += 26;
+            _craftableToggleImage = MkImg(togRT, c(0.10f, 0.16f, 0.22f, 0.8f));
+            NativeUiStyle.Apply(_craftableToggleImage,
+                NativeUiStyle.Role.Button, c(0.10f, 0.16f, 0.22f, 0.8f));
+            var craftableButton = togRT.gameObject.AddComponent<Button>();
+            craftableButton.targetGraphic = _craftableToggleImage;
+            craftableButton.navigation = new Navigation { mode = Navigation.Mode.None };
+            craftableButton.onClick.AddListener(() =>
+            {
+                _showOnlyAvailable = !_showOnlyAvailable;
+                UpdateCraftableToggleVisual();
+                RefreshRecipeList();
+                if (_built) Refresh();
+            });
+            _craftableToggleLabel = MkTxt(togRT, "Ready", 12, C_Dim, TextAnchor.MiddleCenter);
+            Fill(_craftableToggleLabel.rectTransform);
+            UpdateCraftableToggleVisual();
+            y += 34;
 
             // Two-panel area: recipes (left) + details (right)
-            float panelH = H - y - 70; // leave room for combine + footer
+            float panelH = H - y - 88;
 
             // LEFT: Recipe list scroll
             var leftPanel = MkRect(_windowPanel, "Left");
-            MkImg(leftPanel, C_Panel);
-            leftPanel.anchorMin = V(0, 1); leftPanel.anchorMax = V(0.42f, 1);
+            MkImg(leftPanel, Color.clear);
+            leftPanel.anchorMin = V(0, 1); leftPanel.anchorMax = V(0.49f, 1);
             leftPanel.pivot = V(0, 1);
             leftPanel.offsetMin = V(6, -(y + panelH));
             leftPanel.offsetMax = V(0, -y);
 
-            // Recipe header
-            var rHdr = MkTxt(leftPanel, "Recipes", 12, C_Accent, TextAnchor.MiddleCenter);
-            rHdr.fontStyle = FontStyle.Bold;
-            rHdr.rectTransform.anchorMin = V(0, 1); rHdr.rectTransform.anchorMax = V(1, 1);
-            rHdr.rectTransform.pivot = V(0.5f, 1);
-            rHdr.rectTransform.offsetMin = V(0, -20);
-            rHdr.rectTransform.offsetMax = Vector2.zero;
-
             // Recipe scroll
             var rScrollRT = MkRect(leftPanel, "RScroll");
             rScrollRT.anchorMin = V(0, 0); rScrollRT.anchorMax = V(1, 1);
-            rScrollRT.offsetMin = V(2, 2); rScrollRT.offsetMax = V(-2, -22);
+            rScrollRT.offsetMin = V(8, 4); rScrollRT.offsetMax = V(-8, -4);
             var sr = rScrollRT.gameObject.AddComponent<ScrollRect>();
             sr.horizontal = false; sr.vertical = true;
             sr.movementType = ScrollRect.MovementType.Clamped;
@@ -302,6 +445,7 @@ namespace ErenshorSkills.UI
 
             var vpRT = MkRect(rScrollRT, "VP");
             MkImg(vpRT, Color.clear); Fill(vpRT);
+            vpRT.offsetMax = V(-10, 0);
             vpRT.gameObject.AddComponent<RectMask2D>();
 
             _recipeContent = MkRect(vpRT, "Content");
@@ -312,10 +456,36 @@ namespace ErenshorSkills.UI
             sr.viewport = vpRT; sr.content = _recipeContent;
             _recipeScroll = sr;
 
+            // Match the Skills book: wheel scrolling plus a visible,
+            // draggable native-styled bar whenever the recipe list overflows.
+            var sbRT = MkRect(rScrollRT, "SB");
+            var sbImage = MkImg(sbRT, c(0.10f, 0.16f, 0.20f, 0.5f));
+            NativeUiStyle.Apply(sbImage, NativeUiStyle.Role.Input,
+                c(0.10f, 0.16f, 0.20f, 0.5f));
+            sbRT.anchorMin = V(1, 0); sbRT.anchorMax = V(1, 1);
+            sbRT.pivot = V(1, 0.5f);
+            sbRT.sizeDelta = V(8, 0); sbRT.anchoredPosition = Vector2.zero;
+
+            var sb = sbRT.gameObject.AddComponent<Scrollbar>();
+            sb.direction = Scrollbar.Direction.BottomToTop;
+            var area = MkRect(sbRT, "Area"); Fill(area);
+            area.offsetMin = V(1, 1); area.offsetMax = V(-1, -1);
+            var handle = MkRect(area, "Handle");
+            var handleImage = MkImg(handle, c(0.30f, 0.45f, 0.50f, 0.85f));
+            NativeUiStyle.Apply(handleImage, NativeUiStyle.Role.Button,
+                c(0.30f, 0.45f, 0.50f, 0.85f));
+            Fill(handle);
+            sb.handleRect = handle;
+            sb.targetGraphic = handleImage;
+            sr.verticalScrollbar = sb;
+            sr.verticalScrollbarVisibility =
+                ScrollRect.ScrollbarVisibility.AutoHide;
+            _recipeScrollbar = sb;
+
             // RIGHT: Detail panel
             _detailPanel = MkRect(_windowPanel, "Right");
-            MkImg(_detailPanel, C_Panel);
-            _detailPanel.anchorMin = V(0.43f, 1); _detailPanel.anchorMax = V(1, 1);
+            MkImg(_detailPanel, Color.clear);
+            _detailPanel.anchorMin = V(0.51f, 1); _detailPanel.anchorMax = V(1, 1);
             _detailPanel.pivot = V(0, 1);
             _detailPanel.offsetMin = V(0, -(y + panelH));
             _detailPanel.offsetMax = V(-6, -y);
@@ -324,12 +494,19 @@ namespace ErenshorSkills.UI
 
             // Item icon (top-left of detail panel)
             _detailIconRT = MkRect(_detailPanel, "DetailIcon");
-            _detailIcon = MkImg(_detailIconRT, Color.clear);
-            _detailIcon.raycastTarget = true;
+            var detailFrame = MkImg(_detailIconRT, Color.white);
+            NativeUiStyle.Apply(detailFrame, NativeUiStyle.Role.Slot,
+                Color.white);
             _detailIconRT.anchorMin = V(0, 1); _detailIconRT.anchorMax = V(0, 1);
             _detailIconRT.pivot = V(0, 1);
             _detailIconRT.anchoredPosition = V(6, -(dy));
-            _detailIconRT.sizeDelta = V(36, 36);
+            _detailIconRT.sizeDelta = V(58, 58);
+            var detailIconInner = MkRect(_detailIconRT, "Icon");
+            _detailIcon = MkImg(detailIconInner, Color.clear);
+            _detailIcon.raycastTarget = true;
+            Fill(detailIconInner);
+            detailIconInner.offsetMin = V(5, 5);
+            detailIconInner.offsetMax = V(-5, -5);
             // Tooltip will be added dynamically in Refresh
 
             // Name (to the right of icon)
@@ -338,27 +515,28 @@ namespace ErenshorSkills.UI
             _detailName.rectTransform.anchorMin = V(0, 1);
             _detailName.rectTransform.anchorMax = V(1, 1);
             _detailName.rectTransform.pivot = V(0.5f, 1);
-            _detailName.rectTransform.offsetMin = V(46, -(dy + 20));
+            _detailName.rectTransform.offsetMin = V(68, -(dy + 40));
             _detailName.rectTransform.offsetMax = V(-6, -dy);
-            dy += 40;
+            dy += 62;
 
             _detailDesc = MkTxt(_detailPanel, "", 10, C_Dim, TextAnchor.UpperLeft);
-            _detailDesc.horizontalOverflow = HorizontalWrapMode.Wrap;
-            PlaceIn(_detailDesc.rectTransform, dy, 0, 6, 6); // zero height — hidden
+            _detailDesc.enableWordWrapping = true;
+            PlaceIn(_detailDesc.rectTransform, dy, 40, 6, 6); dy += 42;
 
             _detailReqSkill = MkTxt(_detailPanel, "", 11, Color.white, TextAnchor.MiddleLeft);
-            _detailReqSkill.supportRichText = true;
+            _detailReqSkill.richText = true;
             PlaceIn(_detailReqSkill.rectTransform, dy, 16, 6, 6); dy += 18;
 
             _detailTrivial = MkTxt(_detailPanel, "", 11, C_Dim, TextAnchor.MiddleLeft);
-            _detailTrivial.supportRichText = true;
+            _detailTrivial.richText = true;
             PlaceIn(_detailTrivial.rectTransform, dy, 16, 6, 6); dy += 18;
 
             _detailChance = MkTxt(_detailPanel, "", 11, C_Green, TextAnchor.MiddleLeft);
             PlaceIn(_detailChance.rectTransform, dy, 16, 6, 6); dy += 20;
 
             // Materials header
-            var matHdr = MkTxt(_detailPanel, "── Materials ──", 11, C_Accent, TextAnchor.MiddleCenter);
+            var matHdr = MkTxt(_detailPanel, "Materials", 14,
+                c(0.72f, 0.70f, 0.88f), TextAnchor.MiddleCenter);
             matHdr.fontStyle = FontStyle.Bold;
             PlaceIn(matHdr.rectTransform, dy, 16, 6, 6); dy += 18;
 
@@ -375,20 +553,22 @@ namespace ErenshorSkills.UI
 
             // Combine progress bar
             float combineY = y + panelH + 4;
-            var cbBg = MkRect(_windowPanel, "CombBg");
-            MkImg(cbBg, C_BarBg); StretchH(cbBg, combineY, 16, 6, 6);
-            _combineBarFill = MkRect(cbBg, "CombFill");
-            MkImg(_combineBarFill, c(1f, 0.8f, 0.2f, 0.8f)).raycastTarget = false;
-            _combineBarFill.anchorMin = V(0, 0); _combineBarFill.anchorMax = V(0, 1);
-            _combineBarFill.pivot = V(0, 0.5f);
-            _combineBarFill.offsetMin = V(1, 1); _combineBarFill.offsetMax = V(0, -1);
+            var cbBg = MkRect(_rightPage, "CombBg");
+            var combineProgressImage = MkImg(cbBg, C_BarBg);
+            NativeUiStyle.Apply(combineProgressImage,
+                NativeUiStyle.Role.Progress, C_BarBg);
+            StretchH(cbBg, combineY, 22, 12, 12);
+            _combineBarFill = CreateProgressFill(cbBg, "CombFill",
+                c(1f, 0.8f, 0.2f, 0.8f), 6, 6);
             _combineBarText = MkTxt(cbBg, "", 9, Color.white, TextAnchor.MiddleCenter);
             _combineBarText.fontStyle = FontStyle.Bold; Fill(_combineBarText.rectTransform);
 
             // Combine button (left half)
-            float btnY = combineY + 20;
-            var btnRT = MkRect(_windowPanel, "CombBtn");
-            MkImg(btnRT, c(0.10f, 0.18f, 0.20f, 0.9f));
+            float btnY = combineY + 28;
+            var btnRT = MkRect(_rightPage, "CombBtn");
+            var combineImage = MkImg(btnRT, c(0.10f, 0.18f, 0.20f, 0.9f));
+            NativeUiStyle.Apply(combineImage, NativeUiStyle.Role.Button,
+                c(0.10f, 0.18f, 0.20f, 0.9f));
             btnRT.anchorMin = V(0, 1); btnRT.anchorMax = V(0.52f, 1);
             btnRT.pivot = V(0.5f, 1);
             btnRT.offsetMin = V(6, -(btnY + 30));
@@ -401,8 +581,10 @@ namespace ErenshorSkills.UI
             Fill(_combineBtnText.rectTransform);
 
             // Deconstruct button (right half)
-            var dRT = MkRect(_windowPanel, "DeconBtn");
-            MkImg(dRT, c(0.18f, 0.12f, 0.10f, 0.9f));
+            var dRT = MkRect(_rightPage, "DeconBtn");
+            var deconstructImage = MkImg(dRT, c(0.18f, 0.12f, 0.10f, 0.9f));
+            NativeUiStyle.Apply(deconstructImage, NativeUiStyle.Role.Button,
+                c(0.18f, 0.12f, 0.10f, 0.9f));
             dRT.anchorMin = V(0.53f, 1); dRT.anchorMax = V(1, 1);
             dRT.pivot = V(0.5f, 1);
             dRT.offsetMin = V(0, -(btnY + 30));
@@ -415,14 +597,27 @@ namespace ErenshorSkills.UI
             Fill(_deconBtnText.rectTransform);
 
             // Status text (between button and footer)
-            _combineStatusText = MkTxt(_windowPanel, "", 10, C_Dim, TextAnchor.MiddleCenter);
+            _combineStatusText = MkTxt(_rightPage, "", 11, C_Dim, TextAnchor.MiddleCenter);
             StretchH(_combineStatusText.rectTransform, btnY + 32, 14, 6, 6);
-            _combineStatusText.supportRichText = true;
+            _combineStatusText.richText = true;
 
             // Footer (at the very bottom, no overlap)
-            _footerText = MkTxt(_windowPanel, "", 9, c(0.35f, 0.45f, 0.48f), TextAnchor.MiddleCenter);
+            _footerText = MkTxt(_rightPage, "", 9, c(0.35f, 0.45f, 0.48f), TextAnchor.MiddleCenter);
             StretchH(_footerText.rectTransform, H - 16, 14, 6, 6);
         } // end Build()
+
+        RectTransform BuildNativePage(Transform parent, string name, float x)
+        {
+            var page = MkRect(parent, name);
+            var image = MkImg(page, C_WinBg);
+            NativeUiStyle.Apply(image, NativeUiStyle.Role.Window, C_WinBg);
+            page.anchorMin = V(0, 1);
+            page.anchorMax = V(0, 1);
+            page.pivot = V(0, 1);
+            page.anchoredPosition = V(x, 0);
+            page.sizeDelta = V(300, H);
+            return page;
+        }
 
         // ══════════════════════════════════════════════════════════
         // REFRESH — update all dynamic text/bars every frame
@@ -440,14 +635,13 @@ namespace ErenshorSkills.UI
             // XP bar
             if (skill.IsMaxLevel)
             {
-                _xpBarFill.anchorMax = V(1, 1); _xpBarFill.offsetMax = V(-1, -1);
+                SetProgressFill(_xpBarFill, 1f);
                 _xpBarText.text = "";
             }
             else
             {
                 float f = Mathf.Clamp01(skill.LevelProgress);
-                _xpBarFill.anchorMax = V(Mathf.Max(f, 0.002f), 1);
-                _xpBarFill.offsetMax = V(-1, -1);
+                SetProgressFill(_xpBarFill, f);
                 _xpBarText.text = "";
             }
 
@@ -455,13 +649,12 @@ namespace ErenshorSkills.UI
             if (_isCombining)
             {
                 float p = Mathf.Clamp01((Time.time - _combineStartTime) / COMBINE_DUR);
-                _combineBarFill.anchorMax = V(Mathf.Max(p, 0.002f), 1);
-                _combineBarFill.offsetMax = V(-1, -1);
+                SetProgressFill(_combineBarFill, p);
                 _combineBarText.text = "Combining...";
             }
             else
             {
-                _combineBarFill.anchorMax = V(0, 1);
+                SetProgressFill(_combineBarFill, 0f);
                 _combineBarText.text = "";
             }
 
@@ -476,7 +669,7 @@ namespace ErenshorSkills.UI
                 bool trivial = skill.Level >= r.TrivialLevel;
 
                 _detailName.text = r.Name;
-                _detailDesc.text = "";
+                _detailDesc.text = r.ResultDescription ?? "";
 
                 // Set icon
                 var iconSprite = GetItemIcon(r.Name);
@@ -503,7 +696,7 @@ namespace ErenshorSkills.UI
 
                 if (canAttempt)
                 {
-                    float ch = Mathf.Clamp(40f + (skill.Level - r.MinSkillLevel) * 1.5f, 15f, 95f);
+                    float ch = Skills.Tradeskills.GetSuccessChance(skill, r);
                     Color cc = ch >= 70f ? C_Green : (ch >= 40f ? C_Accent : C_Red);
                     _detailChance.text = $"Success: {ch:F0}%";
                     _detailChance.color = cc;
@@ -516,11 +709,13 @@ namespace ErenshorSkills.UI
                 // Combine button state
                 bool hasAll = HasAllMaterials(r);
                 bool canCombine = canAttempt && hasAll && !_isCombining;
+                _combineBtn.interactable = canCombine;
                 _combineBtnText.text = canCombine ? "Combine" : "Cannot Combine";
                 _combineBtnText.color = canCombine ? C_Gold : C_Dim;
 
                 // Deconstruct button: need the item in inventory + know the recipe
                 bool hasItem = CountPlayerItem(r.Name) > 0;
+                _deconBtn.interactable = hasItem && !_isCombining;
                 _deconBtnText.text = hasItem ? "Deconstruct" : "No Item";
                 _deconBtnText.color = hasItem ? C_Accent : C_Dim;
             }
@@ -530,6 +725,8 @@ namespace ErenshorSkills.UI
                 _detailReqSkill.text = ""; _detailTrivial.text = "";
                 _detailChance.text = ""; _detailValue.text = "";
                 ClearMaterials();
+                _combineBtn.interactable = false;
+                _deconBtn.interactable = false;
                 _combineBtnText.text = "Select a recipe"; _combineBtnText.color = C_Dim;
                 _deconBtnText.text = "Deconstruct"; _deconBtnText.color = C_Dim;
                 // Clear icon
@@ -544,49 +741,65 @@ namespace ErenshorSkills.UI
         // ══════════════════════════════════════════════════════════
 
         List<GameObject> _recipeRows = new List<GameObject>();
+        string _recipeRowsSignature = "";
 
         // Icon cache for recipe result items
         static Dictionary<string, Sprite> _iconCache = new Dictionary<string, Sprite>();
+        static HashSet<Sprite> _ownedIconSprites = new HashSet<Sprite>();
         static string _iconDir;
 
         static Sprite GetItemIcon(string itemName)
         {
+            if (string.IsNullOrEmpty(itemName)) return null;
             if (_iconCache.TryGetValue(itemName, out var cached)) return cached;
-            
-            if (_iconDir == null)
-                _iconDir = System.IO.Path.Combine(
-                    System.IO.Path.GetDirectoryName(SkillsPlugin.Instance.Info.Location),
-                    "ClassicSkills", "Icons");
-
-            string path = System.IO.Path.Combine(_iconDir, itemName + ".png");
-            if (!System.IO.File.Exists(path))
-            {
-                _iconCache[itemName] = null;
-                return null;
-            }
 
             try
             {
+                Item item = Items.ItemFactory.GetItem(itemName);
+                if (item == null && GameData.ItemDB?.ItemDB != null)
+                    item = GameData.ItemDB.ItemDB.FirstOrDefault(candidate =>
+                        candidate != null && string.Equals(candidate.ItemName, itemName,
+                            StringComparison.OrdinalIgnoreCase));
+                if (item?.ItemIcon != null)
+                {
+                    _iconCache[itemName] = item.ItemIcon;
+                    return item.ItemIcon;
+                }
+            }
+            catch { }
+
+            if (_iconDir == null)
+                _iconDir = System.IO.Path.Combine(
+                    RuntimePaths.AssetDirectory, "Icons");
+
+            string path = System.IO.Path.Combine(_iconDir, itemName + ".png");
+            if (!System.IO.File.Exists(path)) return null;
+
+            Texture2D tex = null;
+            try
+            {
                 byte[] data = System.IO.File.ReadAllBytes(path);
-                var tex = new Texture2D(64, 64, TextureFormat.RGBA32, false);
+                tex = new Texture2D(64, 64, TextureFormat.RGBA32, false);
                 tex.filterMode = FilterMode.Bilinear;
-                tex.LoadImage(data);
+                if (!tex.LoadImage(data)) throw new InvalidOperationException("Invalid image data.");
                 var sprite = Sprite.Create(tex, new UnityEngine.Rect(0, 0, tex.width, tex.height),
                     new Vector2(0.5f, 0.5f));
+                _ownedIconSprites.Add(sprite);
                 _iconCache[itemName] = sprite;
                 return sprite;
             }
             catch
             {
-                _iconCache[itemName] = null;
+                if (tex) UnityEngine.Object.Destroy(tex);
                 return null;
             }
         }
 
         void PopulateRecipeList(SkillEntry skill)
         {
-            // Rebuild if count changed
-            if (_recipeRows.Count == _filtered.Count) return;
+            string signature = skill.Level + "|" + _selectedRecipeIndex + "|" +
+                string.Join("\u001f", _filtered.Select(recipe => recipe?.Name ?? ""));
+            if (_recipeRows.Count == _filtered.Count && _recipeRowsSignature == signature) return;
 
             ClearRecipeRows();
             float ry = 2;
@@ -598,19 +811,22 @@ namespace ErenshorSkills.UI
                 int idx = i; // capture for closure
 
                 var rowRT = MkRect(_recipeContent, recipe.Name);
-                MkImg(rowRT, idx == _selectedRecipeIndex
-                    ? c(0.15f, 0.25f, 0.28f, 0.6f) : Color.clear);
+                var rowImage = MkImg(rowRT, Color.white);
+                NativeUiStyle.Apply(rowImage, NativeUiStyle.Role.Tab,
+                    Color.white);
+                rowImage.color = idx == _selectedRecipeIndex
+                    ? c(0.78f, 1f, 0.95f, 1f) : Color.white;
                 rowRT.anchorMin = V(0, 1); rowRT.anchorMax = V(1, 1);
                 rowRT.pivot = V(0.5f, 1);
-                rowRT.offsetMin = V(2, -(ry + 22));
+                rowRT.offsetMin = V(2, -(ry + 36));
                 rowRT.offsetMax = V(-2, -ry);
 
                 // Level tag (right side)
                 string lvl = trivial ? "<color=#666>T</color>"
                     : canAttempt ? $"<color=#4CAF50>{recipe.MinSkillLevel}</color>"
                     : $"<color=#EF5350>{recipe.MinSkillLevel}</color>";
-                var lvlTxt = MkTxt(rowRT, lvl, 10, Color.white, TextAnchor.MiddleRight);
-                lvlTxt.supportRichText = true;
+                var lvlTxt = MkTxt(rowRT, lvl, 12, Color.white, TextAnchor.MiddleRight);
+                lvlTxt.richText = true;
                 lvlTxt.rectTransform.anchorMin = V(0.85f, 0);
                 lvlTxt.rectTransform.anchorMax = V(1, 1);
                 lvlTxt.rectTransform.offsetMin = V(0, 0);
@@ -619,7 +835,7 @@ namespace ErenshorSkills.UI
                 // Recipe name
                 Color nameCol = idx == _selectedRecipeIndex ? C_Gold
                     : canAttempt ? Color.white : C_Dim;
-                var nameTxt = MkTxt(rowRT, recipe.Name, 11, nameCol, TextAnchor.MiddleLeft);
+                var nameTxt = MkTxt(rowRT, recipe.Name, 13, nameCol, TextAnchor.MiddleLeft);
                 if (idx == _selectedRecipeIndex) nameTxt.fontStyle = FontStyle.Bold;
                 nameTxt.rectTransform.anchorMin = V(0, 0);
                 nameTxt.rectTransform.anchorMax = V(0.85f, 1);
@@ -637,16 +853,18 @@ namespace ErenshorSkills.UI
                 });
 
                 _recipeRows.Add(rowRT.gameObject);
-                ry += 22;
+                ry += 36;
             }
 
             _recipeContent.sizeDelta = V(0, ry + 2);
+            _recipeRowsSignature = signature;
         }
 
         void ClearRecipeRows()
         {
             foreach (var go in _recipeRows) if (go) Destroy(go);
             _recipeRows.Clear();
+            _recipeRowsSignature = "";
         }
 
         // ══════════════════════════════════════════════════════════
@@ -777,27 +995,53 @@ namespace ErenshorSkills.UI
 
         static void RefreshRecipeList()
         {
+            string selectedName = _selectedRecipeIndex >= 0 && _selectedRecipeIndex < _filtered.Count
+                ? _filtered[_selectedRecipeIndex]?.Name
+                : null;
             _filtered.Clear();
             var all = Skills.Tradeskills.GetRecipesForSkillPublic(_activeTradeskill);
-            if (all == null) return;
+            if (all == null)
+            {
+                _selectedRecipeIndex = -1;
+                if (_instance && _instance._built) _instance.ClearRecipeRows();
+                return;
+            }
 
             var skill = GetSkillEntry();
-            string search = _searchText.ToLower();
+            string search = (_searchText ?? "").ToLowerInvariant();
 
             foreach (var r in all)
             {
                 // Only show recipes the player has learned
-                if (!SkillsSaveManager.Data.IsRecipeKnown(r.Name)) continue;
-                if (search.Length > 0 && !r.Name.ToLower().Contains(search)) continue;
+                if (!_qaShowAllRecipes &&
+                    !SkillsSaveManager.Data.IsRecipeKnown(r.Name)) continue;
+                if (search.Length > 0 &&
+                    !(r.Name ?? "").ToLowerInvariant().Contains(search)) continue;
                 if (_showOnlyAvailable)
                 {
-                    if (skill.Level < r.MinSkillLevel) continue;
+                    if (skill == null || skill.Level < r.MinSkillLevel) continue;
                     if (!HasAllMaterials(r)) continue;
                 }
                 _filtered.Add(r);
             }
-            if (_selectedRecipeIndex >= _filtered.Count)
-                _selectedRecipeIndex = _filtered.Count - 1;
+            _selectedRecipeIndex = string.IsNullOrEmpty(selectedName)
+                ? -1
+                : _filtered.FindIndex(recipe => string.Equals(recipe?.Name, selectedName,
+                    StringComparison.OrdinalIgnoreCase));
+            if (_instance && _instance._built) _instance.ClearRecipeRows();
+        }
+
+        void UpdateCraftableToggleVisual()
+        {
+            if (_craftableToggleLabel)
+            {
+                _craftableToggleLabel.text = _showOnlyAvailable ? "Ready \u2713" : "Ready";
+                _craftableToggleLabel.color = _showOnlyAvailable ? C_Green : C_Dim;
+            }
+            if (_craftableToggleImage)
+                _craftableToggleImage.color = _showOnlyAvailable
+                    ? c(0.78f, 1f, 0.82f, 1f)
+                    : Color.white;
         }
 
         // ══════════════════════════════════════════════════════════
@@ -817,6 +1061,32 @@ namespace ErenshorSkills.UI
                 case "Tailoring":  return d.Tailoring;
                 default: return null;
             }
+        }
+
+        RectTransform CreateProgressFill(RectTransform track, string name,
+            Color color, float horizontalInset, float verticalInset)
+        {
+            var clip = MkRect(track, name + "Clip");
+            MkImg(clip, Color.clear).raycastTarget = false;
+            Fill(clip);
+            clip.offsetMin = V(horizontalInset, verticalInset);
+            clip.offsetMax = V(-horizontalInset, -verticalInset);
+            clip.gameObject.AddComponent<RectMask2D>();
+
+            var fill = MkRect(clip, name);
+            MkImg(fill, color).raycastTarget = false;
+            fill.pivot = V(0, 0.5f);
+            SetProgressFill(fill, 0f);
+            return fill;
+        }
+
+        static void SetProgressFill(RectTransform fill, float value)
+        {
+            if (!fill) return;
+            fill.anchorMin = V(0, 0);
+            fill.anchorMax = V(Mathf.Clamp01(value), 1);
+            fill.offsetMin = Vector2.zero;
+            fill.offsetMax = Vector2.zero;
         }
 
         static string GetIcon()
@@ -846,22 +1116,55 @@ namespace ErenshorSkills.UI
             return 10000;
         }
 
+        /// <summary>
+        /// Count total of an item across inventory, bags (if enabled), and bank (if enabled).
+        /// Mirrors the same logic as Tradeskills.CountMaterialAll.
+        /// </summary>
         static int CountPlayerItem(string itemName)
         {
+            long found = 0;
+
+            // 1. Inventory
             try
             {
                 var inv = GameData.PlayerInv;
-                if (inv?.StoredSlots == null) return 0;
-                int c = 0;
-                foreach (var slot in inv.StoredSlots)
+                if (inv?.StoredSlots != null)
                 {
-                    if (slot != null && slot.MyItem != null &&
-                        slot.MyItem.ItemName == itemName)
-                        c += Mathf.Max(1, slot.Quantity);
+                    foreach (var slot in inv.StoredSlots)
+                    {
+                        if (slot?.MyItem != null && slot.MyItem.ItemName == itemName)
+                            found += slot.MyItem.Stackable ? Mathf.Max(1, slot.Quantity) : 1;
+                    }
                 }
-                return c;
             }
-            catch { return 0; }
+            catch { }
+
+            // 2. Bags (if enabled)
+            if (SkillsPlugin.CfgCraftFromBags.Value)
+            {
+                try { found += Items.BagSystem.CountItemInAllBags(itemName); }
+                catch { }
+            }
+
+            // 3. Bank (if enabled) — reads GlobalBank.StoredItems
+            if (SkillsPlugin.CfgCraftFromBank.Value)
+            {
+                try
+                {
+                    var bankItems = Skills.Tradeskills.GetBankItemsSnapshot();
+                    if (bankItems != null)
+                    {
+                        foreach (var (name, qty) in bankItems)
+                        {
+                            if (name == itemName)
+                                found += qty;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            return found > int.MaxValue ? int.MaxValue : (int)found;
         }
 
         static bool HasAllMaterials(Skills.Tradeskills.Recipe recipe)
@@ -875,7 +1178,6 @@ namespace ErenshorSkills.UI
         void SetVis(bool v)
         {
             if (_canvasGO) _canvasGO.SetActive(v);
-            if (!v) { try { GameData.PlayerTyping = false; } catch { } }
         }
 
         // ══════════════════════════════════════════════════════════
@@ -907,19 +1209,27 @@ namespace ErenshorSkills.UI
             return img;
         }
 
-        static Text MkTxt(Transform parent, string text, int size,
+        static TextMeshProUGUI MkTxt(Transform parent, string text, int size,
             Color color, TextAnchor anchor)
         {
             var rt = MkRect(parent, "T");
-            var t = rt.gameObject.AddComponent<Text>();
+            var t = rt.gameObject.AddComponent<TextMeshProUGUI>();
             t.text = text;
-            t.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
-            t.fontSize = size; t.color = color; t.alignment = anchor;
-            t.supportRichText = true;
-            t.horizontalOverflow = HorizontalWrapMode.Overflow;
-            t.verticalOverflow = VerticalWrapMode.Overflow;
-            t.raycastTarget = false;
+            t.fontSize = size; t.color = color;
+            t.alignment = ToTmpAlignment(anchor);
+            NativeUiStyle.Apply(t);
             return t;
+        }
+
+        static TextAlignmentOptions ToTmpAlignment(TextAnchor anchor)
+        {
+            switch (anchor)
+            {
+                case TextAnchor.MiddleLeft: return TextAlignmentOptions.MidlineLeft;
+                case TextAnchor.MiddleRight: return TextAlignmentOptions.MidlineRight;
+                case TextAnchor.UpperLeft: return TextAlignmentOptions.TopLeft;
+                default: return TextAlignmentOptions.Center;
+            }
         }
 
         static void Fill(RectTransform rt)
@@ -951,10 +1261,20 @@ namespace ErenshorSkills.UI
         class InputBlocker : MonoBehaviour,
             IPointerEnterHandler, IPointerExitHandler
         {
+            bool _inside;
             public void OnPointerEnter(PointerEventData e)
-            { try { GameData.PlayerTyping = true; } catch { } }
+            {
+                if (_inside) return;
+                _inside = true;
+                AddonInputState.Enter();
+            }
             public void OnPointerExit(PointerEventData e)
-            { try { GameData.PlayerTyping = false; } catch { } }
+            {
+                if (!_inside) return;
+                _inside = false;
+                AddonInputState.Exit();
+            }
+            void OnDisable() { if (_inside) OnPointerExit(null); }
         }
 
         class WindowDragger : MonoBehaviour,

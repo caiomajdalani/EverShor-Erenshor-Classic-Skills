@@ -4,7 +4,7 @@
     <TargetFramework>netstandard2.1</TargetFramework>
     <AssemblyName>ErenshorClassicSkills</AssemblyName>
     <RootNamespace>ErenshorSkills</RootNamespace>
-    <Version>1.0.0</Version>
+    <Version>1.8.1</Version>
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
 
@@ -25,11 +25,19 @@
          - UnityEngine.UIModule.dll
          - UnityEngine.InputLegacyModule.dll
          - UnityEngine.PhysicsModule.dll
-         - UnityEngine.TextRenderingModule.dll
+         - UnityEngine.ParticleSystemModule.dll
+         - UnityEngine.AIModule.dll
+         - UnityEngine.JSONSerializeModule.dll
+         - UnityEngine.ImageConversionModule.dll
+         - UnityEngine.AudioModule.dll
+       - UnityEngine.AnimationModule.dll
+       - UnityEngine.TextRenderingModule.dll
+       - UnityEngine.ScreenCaptureModule.dll
+         - UnityEngine.UI.dll
          - Unity.TextMeshPro.dll
     
     3. Run:  dotnet build
-    4. Copy bin/Debug/netstandard2.1/ErenshorClassicSkills.dll
+    4. Copy bin/Release/netstandard2.1/ErenshorClassicSkills.dll
        into Erenshor/BepInEx/plugins/
   -->
 
@@ -66,6 +74,14 @@
       <HintPath>lib\UnityEngine.PhysicsModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule">
+      <HintPath>lib\UnityEngine.ParticleSystemModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AIModule">
+      <HintPath>lib\UnityEngine.AIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.JSONSerializeModule">
       <HintPath>lib/UnityEngine.JSONSerializeModule.dll</HintPath>
     </Reference>
@@ -96,6 +112,22 @@
       <HintPath>lib\UnityEngine.AnimationModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.ScreenCaptureModule">
+      <HintPath>lib\UnityEngine.ScreenCaptureModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Embed all icons, VFX textures, animations, and models in the DLL. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\Icons\**\*.png" />
+    <!-- Extra Settings uses Erenshor's native Options_eq_icon_r sprite. -->
+    <EmbeddedResource Remove="Resources\Icons\ExtraSettingsMenu.png" />
+    <EmbeddedResource Include="Resources\Vfx\**\*.png" />
+    <EmbeddedResource Include="Resources\Audio\**\*.wav" />
+    <EmbeddedResource Include="Resources\Audio\**\*.md" />
+    <EmbeddedResource Include="Resources\Models\**\*" />
+    <EmbeddedResource Include="Resources\Animations\**\*" />
   </ItemGroup>
 
 </Project>
