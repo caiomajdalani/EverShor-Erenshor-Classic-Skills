@@ -4,7 +4,7 @@ An EverQuest-inspired skills and tradeskills mod for [Erenshor](https://store.st
 
 ## Compatibility
 
-Version **1.8.0** is built and tested for Erenshor Steam build **24405256**
+Version **1.8.2** is built and tested for Erenshor Steam build **24405256**
 (installed July 25, 2026). It supports either **BepInEx 5** or Lunaris through Lunaris's
 legacy-plugin wrapper, including the current auto-updated Lunaris 0.1.9 runtime.
 Attack Sync Fix is included; do **not** install the standalone Attack Sync Fix

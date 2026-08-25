@@ -8,8 +8,8 @@ namespace ErenshorSkills.Monk
 {
     /// <summary>
     /// Seven native martial skills retained by exact native Skill identity.
-    /// Native Erenshor has fixed per-class level fields, so a temporary native
-    /// class proxy is used only while the Monk consumes a supported book.
+    /// Native Erenshor has fixed per-class level fields, so a custom-class book
+    /// handler enforces the mapped level without ever changing the Monk's class.
     /// </summary>
     internal static class MonkSharedSkills
     {
@@ -39,20 +39,6 @@ namespace ErenshorSkills.Monk
                 RequiredLevel = requiredLevel;
                 Proxy = proxy;
             }
-        }
-
-        internal struct NativeClassSwap
-        {
-            internal Stats Stats;
-            internal Class OriginalClass;
-            internal bool Changed;
-            // ItemIcon.OnPointerUp gates the whole learn block on
-            // item.Classes.Contains(player class) BEFORE the per-class skill
-            // check. Swapping the Monk to the proxy therefore fails that outer
-            // gate on Monk-only tomes, so the proxy is lent to the item's
-            // class list for the duration of the call and removed afterwards.
-            internal Item Item;
-            internal Class LentClass;
         }
 
         private static readonly Definition[] Definitions =
@@ -138,49 +124,32 @@ namespace ErenshorSkills.Monk
             }
         }
 
-        internal static NativeClassSwap BeginNativeRules(ItemIcon icon,
-            bool eligibleInput)
+        private static bool TryGetUseLevel(Item item, out int level)
         {
-            var state = new NativeClassSwap();
-            Stats stats = GameData.PlayerStats;
-            Item item = icon?.MyItem;
-            if (!eligibleInput || stats == null || item?.TeachSkill == null ||
-                !MonkCatalog.IsMonkClass(stats.CharacterClass))
-                return state;
-
-            Class proxy = null;
+            level = 0;
             if (TryGetDefinition(item, out Definition shared))
-                proxy = ResolveProxy(shared.Proxy);
-            else if (MonkCatalog.TryGetDefinition(item.TeachSkill, out _))
-                proxy = GameData.ClassDB?.Duelist;
-            if (proxy == null) return state;
-
-            state.Stats = stats;
-            state.OriginalClass = stats.CharacterClass;
-            state.Changed = true;
-            stats.CharacterClass = proxy;
-            if (item.Classes != null && !item.Classes.Contains(proxy))
-            {
-                item.Classes.Add(proxy);
-                state.Item = item;
-                state.LentClass = proxy;
-            }
-            return state;
+                level = shared.RequiredLevel;
+            else if (MonkCatalog.TryGetDefinition(item?.TeachSkill,
+                    out MonkTechniqueDefinition custom))
+                level = custom.Level;
+            return level > 0;
         }
 
-        private static Class ResolveProxy(ProxyClass proxy)
+        internal static Items.CustomClassSkillBookUse.State BeginMouseUse(
+            ItemIcon icon,
+            UnityEngine.EventSystems.PointerEventData eventData)
         {
-            return proxy == ProxyClass.Paladin
-                ? GameData.ClassDB?.Paladin
-                : GameData.ClassDB?.Duelist;
+            if (!TryGetUseLevel(icon?.MyItem, out int level)) return default;
+            return Items.CustomClassSkillBookUse.BeginMouse(icon, eventData,
+                MonkCatalog.MonkClass, level);
         }
 
-        internal static void RestoreNativeClass(NativeClassSwap state)
+        internal static Items.CustomClassSkillBookUse.State BeginGamepadUse(
+            ItemIcon icon)
         {
-            if (state.Changed && state.Stats != null)
-                state.Stats.CharacterClass = state.OriginalClass;
-            if (state.Item?.Classes != null && state.LentClass != null)
-                state.Item.Classes.Remove(state.LentClass);
+            if (!TryGetUseLevel(icon?.MyItem, out int level)) return default;
+            return Items.CustomClassSkillBookUse.BeginGamepad(icon,
+                MonkCatalog.MonkClass, level);
         }
 
         internal static void AppendTooltipRequirement(ItemInfoWindow window,
@@ -264,7 +233,7 @@ namespace ErenshorSkills.Monk
                     errors.Add(definition.SkillName + " eligibility");
             }
             detail = errors.Count == 0
-                ? "seven exact native martial skills/books at Monk levels 1/2/2/6/8/24/32 with mouse, controller, tooltip, ID-save, and hotbar compatibility"
+                ? "seven exact native martial skills/books at Monk levels 1/2/2/6/8/24/32 with mouse, controller, tooltip, ID-save, and hotbar compatibility without changing the player class"
                 : string.Join("; ", errors);
             return errors.Count == 0;
         }
@@ -274,24 +243,24 @@ namespace ErenshorSkills.Monk
     internal static class Patch_MonkSkillMouseUse
     {
         [HarmonyPrefix, HarmonyPriority(Priority.First)]
-        private static void Prefix(ItemIcon __instance,
+        private static bool Prefix(ItemIcon __instance,
             UnityEngine.EventSystems.PointerEventData eventData,
-            out MonkSharedSkills.NativeClassSwap __state)
+            out Items.CustomClassSkillBookUse.State __state)
         {
-            bool rightClick = eventData != null && eventData.button ==
-                UnityEngine.EventSystems.PointerEventData.InputButton.Right;
-            __state = MonkSharedSkills.BeginNativeRules(__instance, rightClick);
+            __state = MonkSharedSkills.BeginMouseUse(__instance, eventData);
+            return !__state.Suppressed;
         }
 
         [HarmonyPostfix, HarmonyPriority(Priority.Last)]
-        private static void Postfix(MonkSharedSkills.NativeClassSwap __state) =>
-            MonkSharedSkills.RestoreNativeClass(__state);
+        private static void Postfix(
+            Items.CustomClassSkillBookUse.State __state) =>
+            Items.CustomClassSkillBookUse.Complete(__state);
 
         [HarmonyFinalizer]
         private static Exception Finalizer(Exception __exception,
-            MonkSharedSkills.NativeClassSwap __state)
+            Items.CustomClassSkillBookUse.State __state)
         {
-            MonkSharedSkills.RestoreNativeClass(__state);
+            Items.CustomClassSkillBookUse.Restore(__state);
             return __exception;
         }
     }
@@ -300,19 +269,21 @@ namespace ErenshorSkills.Monk
     internal static class Patch_MonkSkillGamepadUse
     {
         [HarmonyPrefix, HarmonyPriority(Priority.First)]
-        private static void Prefix(ItemIcon __instance,
-            out MonkSharedSkills.NativeClassSwap __state) =>
-            __state = MonkSharedSkills.BeginNativeRules(__instance, true);
+        private static bool Prefix(ItemIcon __instance,
+            out Items.CustomClassSkillBookUse.State __state) =>
+            !(__state = MonkSharedSkills.BeginGamepadUse(__instance))
+                .Suppressed;
 
         [HarmonyPostfix, HarmonyPriority(Priority.Last)]
-        private static void Postfix(MonkSharedSkills.NativeClassSwap __state) =>
-            MonkSharedSkills.RestoreNativeClass(__state);
+        private static void Postfix(
+            Items.CustomClassSkillBookUse.State __state) =>
+            Items.CustomClassSkillBookUse.Complete(__state);
 
         [HarmonyFinalizer]
         private static Exception Finalizer(Exception __exception,
-            MonkSharedSkills.NativeClassSwap __state)
+            Items.CustomClassSkillBookUse.State __state)
         {
-            MonkSharedSkills.RestoreNativeClass(__state);
+            Items.CustomClassSkillBookUse.Restore(__state);
             return __exception;
         }
     }

@@ -9,10 +9,10 @@ namespace ErenshorSkills.Necromancer
     /// <summary>
     /// Gives Necromancers access to the combat skills that are genuinely shared
     /// by Arcanists and at least one other native class. The game has no custom-
-    /// class required-level field on Skill, so the native Arcanist requirement
-    /// is reused at the instant a supported book is consumed. The learned object
-    /// is still the original native Skill, preserving its effects and ID-based
-    /// save/load behavior.
+    /// class required-level field on Skill, so the mapped Arcanist level is
+    /// enforced by a custom-class book handler. The player's class is never
+    /// changed. The learned object is still the original native Skill,
+    /// preserving its effects and ID-based save/load behavior.
     /// </summary>
     internal static class NecromancerSharedSkills
     {
@@ -33,13 +33,6 @@ namespace ErenshorSkills.Necromancer
                 BookName = bookName;
                 RequiredLevel = requiredLevel;
             }
-        }
-
-        internal struct NativeClassSwap
-        {
-            internal Stats Stats;
-            internal Class OriginalClass;
-            internal bool Changed;
         }
 
         private static readonly Definition[] Definitions =
@@ -134,28 +127,27 @@ namespace ErenshorSkills.Necromancer
             return definition != null;
         }
 
-        internal static NativeClassSwap BeginNativeArcanistRules(
-            ItemIcon itemIcon, bool eligibleInput)
+        internal static Items.CustomClassSkillBookUse.State BeginMouseUse(
+            ItemIcon itemIcon,
+            UnityEngine.EventSystems.PointerEventData eventData)
         {
-            var state = new NativeClassSwap();
-            Stats stats = GameData.PlayerStats;
-            Class arcanist = GameData.ClassDB?.Arcanist;
-            if (!eligibleInput || stats == null || arcanist == null ||
-                !NecromancerCatalog.IsNecromancerClass(stats.CharacterClass) ||
-                !TryGetDefinition(itemIcon?.MyItem, out _))
-                return state;
-
-            state.Stats = stats;
-            state.OriginalClass = stats.CharacterClass;
-            state.Changed = true;
-            stats.CharacterClass = arcanist;
-            return state;
+            if (!TryGetDefinition(itemIcon?.MyItem,
+                    out Definition definition))
+                return default;
+            return Items.CustomClassSkillBookUse.BeginMouse(itemIcon,
+                eventData, NecromancerCatalog.NecromancerClass,
+                definition.RequiredLevel);
         }
 
-        internal static void RestoreNativeClass(NativeClassSwap state)
+        internal static Items.CustomClassSkillBookUse.State BeginGamepadUse(
+            ItemIcon itemIcon)
         {
-            if (state.Changed && state.Stats != null)
-                state.Stats.CharacterClass = state.OriginalClass;
+            if (!TryGetDefinition(itemIcon?.MyItem,
+                    out Definition definition))
+                return default;
+            return Items.CustomClassSkillBookUse.BeginGamepad(itemIcon,
+                NecromancerCatalog.NecromancerClass,
+                definition.RequiredLevel);
         }
 
         internal static void AppendTooltipRequirement(
@@ -306,7 +298,8 @@ namespace ErenshorSkills.Necromancer
                 ? "6 native skills and 6 skill books mapped at Arcanist " +
                   "levels 8/12/15/20/8/16; exact native Skill identities " +
                   "preserve effects and ID save/load; mouse/controller " +
-                  "compatibility and tooltip requirement are installed; " +
+                  "compatibility never changes the player class; tooltip " +
+                  "requirement is installed; " +
                   "Arcanist-only skills and Fishing excluded"
                 : string.Join("; ", errors);
             return errors.Count == 0;
@@ -390,6 +383,8 @@ namespace ErenshorSkills.Necromancer
             }
             catch (Exception ex)
             {
+                SkillsPlugin.Log?.LogError(
+                    "Necromancer shared-skill live QA failed: " + ex);
                 errors.Add(ex.GetBaseException().Message);
             }
             finally
@@ -420,7 +415,7 @@ namespace ErenshorSkills.Necromancer
             detail = errors.Count == 0
                 ? "real ItemIcon mouse and gamepad book-use paths denied one " +
                   "level early, learned and consumed at the exact Arcanist " +
-                  "level, restored Necromancer after every call, and rendered " +
+                  "level without changing the player class, and rendered " +
                   "one idempotent Necromancer tooltip requirement; all QA " +
                   "state rolled back"
                 : string.Join("; ", errors);
@@ -566,28 +561,27 @@ namespace ErenshorSkills.Necromancer
     internal static class Patch_NecromancerSharedSkillMouseUse
     {
         [HarmonyPrefix, HarmonyPriority(Priority.First)]
-        private static void Prefix(ItemIcon __instance,
+        private static bool Prefix(ItemIcon __instance,
             UnityEngine.EventSystems.PointerEventData eventData,
-            out NecromancerSharedSkills.NativeClassSwap __state)
+            out Items.CustomClassSkillBookUse.State __state)
         {
-            bool rightClick = eventData != null && eventData.button ==
-                UnityEngine.EventSystems.PointerEventData.InputButton.Right;
-            __state = NecromancerSharedSkills.BeginNativeArcanistRules(
-                __instance, rightClick);
+            __state = NecromancerSharedSkills.BeginMouseUse(__instance,
+                eventData);
+            return !__state.Suppressed;
         }
 
         [HarmonyPostfix, HarmonyPriority(Priority.Last)]
         private static void Postfix(
-            NecromancerSharedSkills.NativeClassSwap __state)
+            Items.CustomClassSkillBookUse.State __state)
         {
-            NecromancerSharedSkills.RestoreNativeClass(__state);
+            Items.CustomClassSkillBookUse.Complete(__state);
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(Exception __exception,
-            NecromancerSharedSkills.NativeClassSwap __state)
+            Items.CustomClassSkillBookUse.State __state)
         {
-            NecromancerSharedSkills.RestoreNativeClass(__state);
+            Items.CustomClassSkillBookUse.Restore(__state);
             return __exception;
         }
     }
@@ -596,25 +590,25 @@ namespace ErenshorSkills.Necromancer
     internal static class Patch_NecromancerSharedSkillGamepadUse
     {
         [HarmonyPrefix, HarmonyPriority(Priority.First)]
-        private static void Prefix(ItemIcon __instance,
-            out NecromancerSharedSkills.NativeClassSwap __state)
+        private static bool Prefix(ItemIcon __instance,
+            out Items.CustomClassSkillBookUse.State __state)
         {
-            __state = NecromancerSharedSkills.BeginNativeArcanistRules(
-                __instance, true);
+            __state = NecromancerSharedSkills.BeginGamepadUse(__instance);
+            return !__state.Suppressed;
         }
 
         [HarmonyPostfix, HarmonyPriority(Priority.Last)]
         private static void Postfix(
-            NecromancerSharedSkills.NativeClassSwap __state)
+            Items.CustomClassSkillBookUse.State __state)
         {
-            NecromancerSharedSkills.RestoreNativeClass(__state);
+            Items.CustomClassSkillBookUse.Complete(__state);
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(Exception __exception,
-            NecromancerSharedSkills.NativeClassSwap __state)
+            Items.CustomClassSkillBookUse.State __state)
         {
-            NecromancerSharedSkills.RestoreNativeClass(__state);
+            Items.CustomClassSkillBookUse.Restore(__state);
             return __exception;
         }
     }

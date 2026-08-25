@@ -37,42 +37,6 @@ namespace ErenshorSkills.Necromancer
         }
     }
 
-    [HarmonyPatch(typeof(CharSelectManager), nameof(CharSelectManager.SelectSlot))]
-    internal static class Patch_NecromancerSelectSlot
-    {
-        private static void Postfix(CharSelectManager __instance)
-        {
-            NecromancerCharacterCreation.RestoreSelectedClass(__instance);
-        }
-    }
-
-    [HarmonyPatch(typeof(CharSelectManager), nameof(CharSelectManager.SelectBackupSlot))]
-    internal static class Patch_NecromancerSelectBackupSlot
-    {
-        private static void Postfix(CharSelectManager __instance)
-        {
-            NecromancerCharacterCreation.RestoreSelectedClass(__instance);
-        }
-    }
-
-    [HarmonyPatch(typeof(CharSelectManager), nameof(CharSelectManager.Play))]
-    internal static class Patch_NecromancerPlay
-    {
-        private static void Prefix(CharSelectManager __instance)
-        {
-            NecromancerCharacterCreation.RestoreSelectedClass(__instance);
-        }
-    }
-
-    [HarmonyPatch(typeof(CharSelectManager), nameof(CharSelectManager.PlayAlternate))]
-    internal static class Patch_NecromancerPlayAlternate
-    {
-        private static void Prefix(CharSelectManager __instance)
-        {
-            NecromancerCharacterCreation.RestoreSelectedClass(__instance);
-        }
-    }
-
     [HarmonyPatch(typeof(CharSelectManager), nameof(CharSelectManager.SaveChar))]
     internal static class Patch_NecromancerStartingItems
     {

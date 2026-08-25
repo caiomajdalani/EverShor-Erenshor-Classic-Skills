@@ -12,7 +12,7 @@ namespace ErenshorSkills
     {
         public const string PluginGuid = "com.erenshor.classicskills";
         public const string PluginName = "Erenshor Classic Skills";
-        public const string PluginVersion = "1.8.1";
+        public const string PluginVersion = "1.8.2";
 
         internal static ManualLogSource Log;
         internal static SkillsPlugin Instance;
@@ -207,10 +207,12 @@ namespace ErenshorSkills
                 typeof(Necromancer.Patch_NecromancerAscensionSpent),
                 typeof(Necromancer.Patch_NecromancerAscensionClassTab),
                 typeof(Necromancer.Patch_NecromancerCharacterCreationStart),
-                typeof(Necromancer.Patch_NecromancerSelectSlot),
-                typeof(Necromancer.Patch_NecromancerSelectBackupSlot),
-                typeof(Necromancer.Patch_NecromancerPlay),
-                typeof(Necromancer.Patch_NecromancerPlayAlternate),
+                typeof(Patches.Patch_CustomClassSelectSlot),
+                typeof(Patches.Patch_CustomClassSelectBackupSlot),
+                typeof(Patches.Patch_CustomClassPlay),
+                typeof(Patches.Patch_CustomClassPlayAlternate),
+                typeof(Patches.Patch_CustomClassNativeSave),
+                typeof(Patches.Patch_CustomClassRawSave),
                 typeof(Necromancer.Patch_NecromancerStartingItems),
                 typeof(Necromancer.Patch_NecromancerPlayerClassIcon),
                 typeof(Necromancer.Patch_NecromancerRaidClassIcon),
@@ -242,10 +244,6 @@ namespace ErenshorSkills
                 typeof(Monk.Patch_MonkAscensionSpent),
                 typeof(Monk.Patch_MonkAscensionClassTab),
                 typeof(Monk.Patch_MonkCharacterCreationStart),
-                typeof(Monk.Patch_MonkSelectSlot),
-                typeof(Monk.Patch_MonkSelectBackupSlot),
-                typeof(Monk.Patch_MonkPlay),
-                typeof(Monk.Patch_MonkPlayAlternate),
                 typeof(Monk.Patch_MonkStartingItems),
                 typeof(Monk.Patch_MonkPlayerClassIcon),
                 typeof(Monk.Patch_MonkRaidClassIcon),
@@ -531,6 +529,12 @@ namespace ErenshorSkills
             try
             {
                 _updateCount++;
+                // The saved custom-class identity is authoritative throughout
+                // play. Repair any native or third-party class reassignment
+                // before class-specific runtime logic executes.
+                Patches.CustomClassIdentity.EnforceCurrent(
+                    "runtime invariant", allowAbilityRecovery: false,
+                    recalculate: true);
                 // Never process mod hotkeys while the player is typing in chat.
                 // This mirrors Erenshor's own input handling and prevents custom
                 // binds such as P or M from opening windows mid-message.

@@ -423,6 +423,7 @@ namespace ErenshorSkills.Testing
                 case "craftedicons": StartCraftedIconSmoke(); break;
                 case "classes":
                 case "consumables": TestNativeConsumableClasses(); break;
+                case "classidentity": TestCustomClassIdentity(); break;
                 case "bagtransfers": TestBagTransfers(); break;
                 case "dumpdb": DatabaseDumper.DumpAll(); break;
                 case "simitems": TestSimPlayerCraftedItems(); break;
@@ -441,6 +442,18 @@ namespace ErenshorSkills.Testing
             }
         }
 
+        private static void TestCustomClassIdentity()
+        {
+            bool passed = Patches.CustomClassIdentity.RunSelfTest(
+                out string detail);
+            string result = passed ? "PASS" : "FAIL";
+            SkillsPlugin.Log.LogInfo(
+                $"Custom class identity QA {result}: {detail}");
+            ChatHelper.Send(
+                $"<color={(passed ? "#4CAF50" : "#EF5350")}>" +
+                $"[Test Mode] Custom class identity {result}: {detail}</color>");
+        }
+
         private static void ShowHelp()
         {
             ChatHelper.Send("<color=#FFD54F>Classic Skills Test Mode</color>");
@@ -452,6 +465,7 @@ namespace ErenshorSkills.Testing
             ChatHelper.Send("/cstest skillprogress &lt;name&gt; &lt;0-100&gt; - set next-level bar percent");
             ChatHelper.Send("/cstest cooldowns &lt;on|off&gt; - toggle short utility cooldowns");
             ChatHelper.Send("/cstest open &lt;skills|tradeskill&gt; - open a test window");
+            ChatHelper.Send("/cstest classidentity - verify native load/save identity guards for Necromancer and Monk");
             ChatHelper.Send("/cstest tradeui &lt;tradeskill&gt; &lt;top|bottom&gt; - preview selection and scrolling without changing recipe knowledge");
             ChatHelper.Send("/cstest vendor &lt;stock|recipes&gt; - visually verify normal merchant stock precedes recipe pages");
             ChatHelper.Send("/cstest smoke - test every item, recipe, feature, and gear visual");
@@ -6828,6 +6842,11 @@ namespace ErenshorSkills.Testing
                 out string corpseSafetyDetail);
             report.Check("FEATURE", "corpse run atomic recovery safeguards",
                 corpseSafety, corpseSafetyDetail);
+            bool customClassIdentity = Patches.CustomClassIdentity
+                .RunSelfTest(out string customClassIdentityDetail);
+            report.Check("FEATURE",
+                "native Necromancer and Monk class identity guards",
+                customClassIdentity, customClassIdentityDetail);
             bool necromancerCatalog = Necromancer.NecromancerCatalog
                 .ValidateCatalog(out string necromancerCatalogDetail);
             report.Check("FEATURE", "Necromancer spell, scroll, icon, and VFX catalog",
@@ -6966,6 +6985,12 @@ namespace ErenshorSkills.Testing
             CheckPatch(report, "sim WTB chat tracking", typeof(UpdateSocialLog), "LogAdd");
             CheckPatch(report, "sim recipe trading", typeof(SimTradeWindow), "CompleteTrade");
             CheckPatch(report, "Necromancer character creation", typeof(CharSelectManager), "SaveChar");
+            CheckPatch(report, "custom class native-load recognition",
+                typeof(CharSelectManager), "SelectSlot");
+            CheckPatch(report, "custom class enter-world recognition",
+                typeof(CharSelectManager), "Play");
+            CheckPatch(report, "custom class native-save protection",
+                typeof(GameManager), "SaveGameData");
             CheckPatch(report, "Necromancer starter aura merchant",
                 typeof(VendorInventory), "Start");
             CheckPatch(report, "Necromancer class gear loot injection",

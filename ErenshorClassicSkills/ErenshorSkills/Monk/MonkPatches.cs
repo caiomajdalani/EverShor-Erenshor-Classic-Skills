@@ -35,37 +35,6 @@ namespace ErenshorSkills.Monk
             MonkCharacterCreation.InstallButton(__instance);
     }
 
-    [HarmonyPatch(typeof(CharSelectManager),
-        nameof(CharSelectManager.SelectSlot))]
-    internal static class Patch_MonkSelectSlot
-    {
-        private static void Postfix(CharSelectManager __instance) =>
-            MonkCharacterCreation.RestoreSelectedClass(__instance);
-    }
-
-    [HarmonyPatch(typeof(CharSelectManager),
-        nameof(CharSelectManager.SelectBackupSlot))]
-    internal static class Patch_MonkSelectBackupSlot
-    {
-        private static void Postfix(CharSelectManager __instance) =>
-            MonkCharacterCreation.RestoreSelectedClass(__instance);
-    }
-
-    [HarmonyPatch(typeof(CharSelectManager), nameof(CharSelectManager.Play))]
-    internal static class Patch_MonkPlay
-    {
-        private static void Prefix(CharSelectManager __instance) =>
-            MonkCharacterCreation.RestoreSelectedClass(__instance);
-    }
-
-    [HarmonyPatch(typeof(CharSelectManager),
-        nameof(CharSelectManager.PlayAlternate))]
-    internal static class Patch_MonkPlayAlternate
-    {
-        private static void Prefix(CharSelectManager __instance) =>
-            MonkCharacterCreation.RestoreSelectedClass(__instance);
-    }
-
     [HarmonyPatch(typeof(CharSelectManager), nameof(CharSelectManager.SaveChar))]
     internal static class Patch_MonkStartingItems
     {
