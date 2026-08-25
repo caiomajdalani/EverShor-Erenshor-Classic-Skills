@@ -966,6 +966,9 @@ namespace ErenshorSkills.Items
             List<Item> storedSnapshot = sim.StoredItems == null
                 ? null : new List<Item>(sim.StoredItems);
             var appliedSpells = new HashSet<Spell>();
+            Spell[] spellDatabaseSnapshot = GameData.SpellDatabase?
+                .SpellDatabase;
+            Spell nullUsedByProbe = null;
 
             try
             {
@@ -1063,6 +1066,29 @@ namespace ErenshorSkills.Items
                         ItemFactory.IsConsumableSpell) == true)
                     errors.Add("crafted food remained in native infinite-use " +
                         "SimPlayer buff AI");
+
+                // Reproduce both native null hazards responsible for the
+                // loader stopping at the auction-house/finalizing boundary:
+                // an injected Spell without UsedBy and an unresolved held
+                // item from a loader/mod ordering race. The prefix must repair
+                // the former, defer the latter, and preserve the save entry.
+                nullUsedByProbe = ScriptableObject.CreateInstance<Spell>();
+                nullUsedByProbe.Id = "CS_QA_NULL_USEDBY";
+                nullUsedByProbe.SpellName = "QA null UsedBy";
+                nullUsedByProbe.UsedBy = null;
+                nullUsedByProbe.SimUsable = false;
+                GameData.SpellDatabase.SpellDatabase =
+                    GameData.SpellDatabase.SpellDatabase
+                        .Concat(new[] { nullUsedByProbe }).ToArray();
+                var unresolved = new ItemSaveData(
+                    "CS_QA_UNRESOLVED_HELD_ITEM", 1);
+                sim.AllHeldItems.Add(unresolved);
+                sim.LoadSimSpells();
+                if (nullUsedByProbe.UsedBy == null)
+                    errors.Add("Sim spell loader left null UsedBy unrepaired");
+                if (!sim.AllHeldItems.Contains(unresolved))
+                    errors.Add("Sim spell loader lost an unresolved held item");
+                sim.AllHeldItems.Remove(unresolved);
 
                 var samples = new Dictionary<string, Item>(
                     StringComparer.OrdinalIgnoreCase);
@@ -1162,6 +1188,12 @@ namespace ErenshorSkills.Items
                     if (storedSnapshot != null)
                         sim.StoredItems.AddRange(storedSnapshot);
                 }
+                if (GameData.SpellDatabase != null &&
+                    spellDatabaseSnapshot != null)
+                    GameData.SpellDatabase.SpellDatabase =
+                        spellDatabaseSnapshot;
+                if (nullUsedByProbe != null)
+                    UnityEngine.Object.Destroy(nullUsedByProbe);
                 try
                 {
                     sim.AuditInventory();
@@ -1180,7 +1212,8 @@ namespace ErenshorSkills.Items
                 ? $"{simName}: native crafted armor stats and offhand attack " +
                   "use/save/ID resolution passed; installed trade handler and " +
                   "autonomous controller accepted Food and Drink, applied " +
-                  "each once, and decremented 2->1; " +
+                  "each once, and decremented 2->1; null UsedBy and unresolved " +
+                  "held-item load hazards were repaired without data loss; " +
                   restrictionDetail +
                   "; exact pre-test Sim state was restored"
                 : string.Join("; ", errors);
@@ -1306,8 +1339,22 @@ namespace ErenshorSkills.Items
     [HarmonyPatch(typeof(SimPlayer), nameof(SimPlayer.LoadSimSpells))]
     internal static class Patch_SimPlayerCraftedConsumableSpellFilter
     {
-        private static void Postfix(SimPlayer __instance)
+        internal sealed class LoadState
         {
+            internal readonly List<ItemSaveData> DeferredHeldItems =
+                new List<ItemSaveData>();
+        }
+
+        [HarmonyPrefix, HarmonyPriority(Priority.First)]
+        private static void Prefix(SimPlayer __instance,
+            out LoadState __state)
+        {
+            __state = PrepareNativeSpellLoad(__instance);
+        }
+
+        private static void Postfix(SimPlayer __instance, LoadState __state)
+        {
+            RestoreDeferredHeldItems(__instance, __state);
             try
             {
                 SimPlayerCraftedItems
@@ -1319,6 +1366,107 @@ namespace ErenshorSkills.Items
                     "Sim consumable spell filtering failed safely: " +
                     ex.Message);
             }
+        }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Exception __exception,
+            SimPlayer __instance, LoadState __state)
+        {
+            RestoreDeferredHeldItems(__instance, __state);
+            if (!(__exception is NullReferenceException)) return __exception;
+
+            // Native LoadSimSpells contains several unguarded dereferences.
+            // The prefix repairs the known collection, spell, equipment, and
+            // unresolved held-item hazards. If a loader supplies another
+            // partially initialized SimPlayer, fail that Sim's spell load
+            // safely instead of aborting the login coroutine at the auction-
+            // house/finalizing boundary.
+            string name = __instance?.GetThisNPC()?.NPCName ??
+                __instance?.name ?? "unknown SimPlayer";
+            SkillsPlugin.Log?.LogWarning(
+                $"SimPlayer spell load recovered for '{name}': " +
+                __exception.Message);
+            return null;
+        }
+
+        internal static LoadState PrepareNativeSpellLoad(SimPlayer sim)
+        {
+            var state = new LoadState();
+            if (sim == null) return state;
+
+            sim.Spellbook ??= new List<SimPlayerSpellSlot>();
+            sim.MyAcquiredSpells ??= new List<Spell>();
+            sim.AllHeldItems ??= new List<ItemSaveData>();
+            sim.MyEquipment ??= new List<SimInvSlot>();
+            sim.MyEquipment.RemoveAll(slot => slot == null);
+            Item empty = GameData.PlayerInv?.Empty;
+            if (empty != null)
+            {
+                foreach (SimInvSlot slot in sim.MyEquipment)
+                {
+                    if (slot.MyItem == null)
+                    {
+                        slot.MyItem = empty;
+                        slot.Quant = 1;
+                    }
+                }
+            }
+
+            NPC npc = sim.GetThisNPC();
+            if (npc != null)
+            {
+                npc.MyHealSpells ??= new List<Spell>();
+                npc.MyBuffSpells ??= new List<Spell>();
+                npc.MyAttackSpells ??= new List<Spell>();
+                npc.MyCCSpells ??= new List<Spell>();
+                npc.MyTauntSpell ??= new List<Spell>();
+                npc.GroupHeals ??= new List<Spell>();
+            }
+
+            SpellDB database = GameData.SpellDatabase;
+            if (database?.SpellDatabase != null)
+            {
+                database.SpellDatabase = database.SpellDatabase
+                    .Where(spell => spell != null).ToArray();
+                foreach (Spell spell in database.SpellDatabase)
+                    spell.UsedBy ??= new List<Class>();
+            }
+
+            ItemDatabase itemDatabase = GameData.ItemDB;
+            if (itemDatabase != null && sim.AllHeldItems.Count > 0)
+            {
+                foreach (ItemSaveData held in sim.AllHeldItems.ToArray())
+                {
+                    if (held == null || string.IsNullOrWhiteSpace(held.ID))
+                    {
+                        state.DeferredHeldItems.Add(held);
+                        continue;
+                    }
+                    Item resolved = null;
+                    try { resolved = itemDatabase.GetItemByID(held.ID); }
+                    catch { }
+                    if (resolved == null)
+                        state.DeferredHeldItems.Add(held);
+                }
+                if (state.DeferredHeldItems.Count > 0)
+                    sim.AllHeldItems.RemoveAll(item =>
+                        state.DeferredHeldItems.Contains(item));
+            }
+            return state;
+        }
+
+        private static void RestoreDeferredHeldItems(SimPlayer sim,
+            LoadState state)
+        {
+            if (sim == null || state?.DeferredHeldItems == null ||
+                state.DeferredHeldItems.Count == 0) return;
+            sim.AllHeldItems ??= new List<ItemSaveData>();
+            foreach (ItemSaveData held in state.DeferredHeldItems)
+            {
+                if (held != null && !sim.AllHeldItems.Contains(held))
+                    sim.AllHeldItems.Add(held);
+            }
+            state.DeferredHeldItems.Clear();
         }
     }
 }

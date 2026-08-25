@@ -27,6 +27,10 @@ namespace ErenshorSkills.Necromancer
     /// </summary>
     internal static class NecromancerVendors
     {
+        private const int StowawayMaxSpellLevel = 10;
+        private const int WillowwatchMaxSpellLevel = 26;
+        private const int AzureMaxSpellLevel = 35;
+
         private static readonly HashSet<string> SupportedScenes =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             { "Stowaway", "Willowwatch", "Azure" };
@@ -51,7 +55,8 @@ namespace ErenshorSkills.Necromancer
                 return false;
             }
             VendorInventory vendor = markers[0].GetComponent<VendorInventory>();
-            List<Item> expected = NecromancerCatalog.GetVendorStock().ToList();
+            int maxSpellLevel = GetMaxSpellLevel(scene);
+            List<Item> expected = GetVendorStock(scene).ToList();
             bool exact = vendor?.ItemsForSale != null &&
                 vendor.ItemsForSale.Count == expected.Count;
             if (exact)
@@ -67,14 +72,23 @@ namespace ErenshorSkills.Necromancer
                 marker.ClassAppearanceReady;
             List<string> overLevel = ClassMerchantStock
                 .FindViolations(vendor?.ItemsForSale).ToList();
-            detail = exact && sensibleAnchor && overLevel.Count == 0
-                ? $"one native merchant with {expected.Count} level-sorted spells and auras; " +
+            List<string> overTier = (vendor?.ItemsForSale ?? new List<Item>())
+                .Where(item => item != null && item.ItemLevel > maxSpellLevel)
+                .Select(item => $"{item.ItemName} ({item.ItemLevel})")
+                .ToList();
+            bool valid = exact && sensibleAnchor && overLevel.Count == 0 &&
+                overTier.Count == 0;
+            detail = valid
+                ? $"one native merchant with {expected.Count} level-sorted spells and auras through level {maxSpellLevel}; " +
                     $"anchored {anchorDistance:0.0}m from {marker.SourceVendorName} " +
                     $"(Arcanist trainer; {marker.SourceVendorRole}, arcane score " +
                     $"{marker.SourceVendorScore}) via {marker.PlacementDescription}" +
                     $"; no weapon or armor above level " +
                     $"{ClassMerchantStock.MaxEquipmentLevel} is stocked"
-                : !exact
+                : overTier.Count > 0
+                    ? $"merchant exceeds the {scene} level {maxSpellLevel} tier: " +
+                        string.Join(", ", overTier)
+                    : !exact
                     ? "merchant inventory is missing, duplicated, or out of order"
                     : overLevel.Count > 0
                         ? "merchant stocks weapons or armor above level " +
@@ -85,7 +99,7 @@ namespace ErenshorSkills.Necromancer
                             $"{marker.SourceVendorRole ?? "<none>"}, arcane score=" +
                             $"{marker.SourceVendorScore}, distance=" +
                             $"{anchorDistance:0.0}m)";
-            return exact && sensibleAnchor && overLevel.Count == 0;
+            return valid;
         }
 
         internal static void OnSceneLoaded(string sceneName)
@@ -215,10 +229,10 @@ namespace ErenshorSkills.Necromancer
             Stats stats = clone.GetComponent<Stats>();
             VendorInventory inventory = clone.GetComponent<VendorInventory>();
             if (inventory == null) inventory = clone.AddComponent<VendorInventory>();
-            inventory.ItemsForSale = new List<Item>(
-                NecromancerCatalog.GetVendorStock());
+            int maxSpellLevel = GetMaxSpellLevel(sceneName);
+            inventory.ItemsForSale = new List<Item>(GetVendorStock(sceneName));
             inventory.QuestRewardsForSale = new List<Quest>();
-            inventory.VendorDesc = "Necromancer Spells and Auras";
+            inventory.VendorDesc = $"Necromancer Spells and Auras (1-{maxSpellLevel})";
 
             if (npc != null)
             {
@@ -293,7 +307,8 @@ namespace ErenshorSkills.Necromancer
             clone.SetActive(true);
             SkillsPlugin.Log.LogInfo(
                 $"Necromancer vendor '{vendorName}' spawned in {sceneName} with " +
-                $"{inventory.ItemsForSale.Count} level-sorted spells and auras beside " +
+                $"{inventory.ItemsForSale.Count} level-sorted spells and auras " +
+                $"through level {maxSpellLevel} beside " +
                 $"{marker.SourceVendorName} ({marker.SourceVendorRole}); " +
                 $"arcanistTrainer={marker.SourceIsArcanistTrainer}; " +
                 $"arcaneScore={marker.SourceVendorScore}; " +
@@ -418,6 +433,24 @@ namespace ErenshorSkills.Necromancer
                 case "Willowwatch": return "Morthane the Grave Tutor";
                 default: return "Veyra of the Azure Crypt";
             }
+        }
+
+        internal static int GetMaxSpellLevel(string sceneName)
+        {
+            if (string.Equals(sceneName, "Stowaway",
+                    StringComparison.OrdinalIgnoreCase))
+                return StowawayMaxSpellLevel;
+            if (string.Equals(sceneName, "Willowwatch",
+                    StringComparison.OrdinalIgnoreCase))
+                return WillowwatchMaxSpellLevel;
+            return AzureMaxSpellLevel;
+        }
+
+        internal static IEnumerable<Item> GetVendorStock(string sceneName)
+        {
+            int maxSpellLevel = GetMaxSpellLevel(sceneName);
+            return NecromancerCatalog.GetVendorStock()
+                .Where(item => item != null && item.ItemLevel <= maxSpellLevel);
         }
     }
 }

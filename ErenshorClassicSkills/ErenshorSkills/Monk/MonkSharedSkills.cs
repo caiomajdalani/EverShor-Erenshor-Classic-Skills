@@ -124,7 +124,7 @@ namespace ErenshorSkills.Monk
             }
         }
 
-        private static bool TryGetUseLevel(Item item, out int level)
+        internal static bool TryGetUseLevel(Item item, out int level)
         {
             level = 0;
             if (TryGetDefinition(item, out Definition shared))

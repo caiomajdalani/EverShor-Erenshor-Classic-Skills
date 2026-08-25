@@ -12,7 +12,7 @@ namespace ErenshorSkills
     {
         public const string PluginGuid = "com.erenshor.classicskills";
         public const string PluginName = "Erenshor Classic Skills";
-        public const string PluginVersion = "1.8.2";
+        public const string PluginVersion = "1.8.4";
 
         internal static ManualLogSource Log;
         internal static SkillsPlugin Instance;
@@ -123,6 +123,7 @@ namespace ErenshorSkills
                 Items.ItemFactory.Initialize(GameData.ItemDB);
             Necromancer.NecromancerCatalog.TryInitialize();
             Monk.MonkCatalog.TryInitialize();
+            Features.CustomClassSimPlayers.ReconcileCurrentPopulation();
             if (activeWorld)
             {
                 Necromancer.NecromancerCatalog.RestoreKnownSpellsAfterHotLoad();
@@ -232,8 +233,8 @@ namespace ErenshorSkills
                 typeof(Necromancer.Patch_NecromancerFeignAggroOn),
                 typeof(Necromancer.Patch_NecromancerFeignForceAggro),
                 typeof(Necromancer.Patch_NecromancerFeignManageAggro),
-                typeof(Necromancer.Patch_NecromancerSharedSkillMouseUse),
-                typeof(Necromancer.Patch_NecromancerSharedSkillGamepadUse),
+                typeof(Items.Patch_CustomClassSkillBookMouseUse),
+                typeof(Items.Patch_CustomClassSkillBookGamepadUse),
                 typeof(Necromancer.Patch_NecromancerSharedSkillTooltip),
                 typeof(Monk.Patch_MonkClassDatabase),
                 typeof(Monk.Patch_MonkSkillDatabase),
@@ -247,8 +248,6 @@ namespace ErenshorSkills
                 typeof(Monk.Patch_MonkStartingItems),
                 typeof(Monk.Patch_MonkPlayerClassIcon),
                 typeof(Monk.Patch_MonkRaidClassIcon),
-                typeof(Monk.Patch_MonkSkillMouseUse),
-                typeof(Monk.Patch_MonkSkillGamepadUse),
                 typeof(Monk.Patch_MonkSkillTooltip),
                 typeof(Monk.Patch_MonkUseSkill),
                 // Routes technique spells into PrepareSpellUse. Without this
@@ -309,6 +308,12 @@ namespace ErenshorSkills
                 typeof(Items.Patch_SimTradeCraftedConsumables),
                 typeof(Items.Patch_SimPlayerCraftedUpgradeInterest),
                 typeof(Items.Patch_SimPlayerCraftedConsumableSpellFilter),
+                typeof(Features.Patch_CustomSimPlayerCategorization),
+                typeof(Features.Patch_CustomSimPlayerClassLoad),
+                typeof(Features.Patch_CustomSimPlayerSkillLoad),
+                typeof(Features.Patch_CustomSimPlayerSave),
+                typeof(Features.Patch_CustomSimPlayerDelete),
+                typeof(Features.Patch_CustomSimPlayerChatter),
             };
 
             // The DPS-benchmark instrumentation hooks the hottest methods in

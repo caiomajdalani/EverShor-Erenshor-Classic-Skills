@@ -41,6 +41,52 @@ namespace ErenshorSkills.Items
                 "CloseSpellDetailsWindow");
 
         internal static State BeginMouse(ItemIcon icon,
+            PointerEventData eventData)
+        {
+            if (!TryResolve(icon?.MyItem, out Class expectedClass,
+                    out int requiredLevel))
+                return default;
+            return BeginMouse(icon, eventData, expectedClass, requiredLevel);
+        }
+
+        internal static State BeginGamepad(ItemIcon icon)
+        {
+            if (!TryResolve(icon?.MyItem, out Class expectedClass,
+                    out int requiredLevel))
+                return default;
+            return BeginGamepad(icon, expectedClass, requiredLevel);
+        }
+
+        private static bool TryResolve(Item item, out Class expectedClass,
+            out int requiredLevel)
+        {
+            expectedClass = null;
+            requiredLevel = 0;
+            Stats stats = GameData.PlayerStats;
+            if (stats == null || item == null) return false;
+
+            if (Necromancer.NecromancerCatalog.IsNecromancerClass(
+                    stats.CharacterClass) &&
+                Necromancer.NecromancerSharedSkills.TryGetDefinition(item,
+                    out Necromancer.NecromancerSharedSkills.Definition necro))
+            {
+                expectedClass = Necromancer.NecromancerCatalog
+                    .NecromancerClass;
+                requiredLevel = necro.RequiredLevel;
+                return expectedClass != null;
+            }
+
+            if (Monk.MonkCatalog.IsMonkClass(stats.CharacterClass) &&
+                Monk.MonkSharedSkills.TryGetUseLevel(item,
+                    out requiredLevel))
+            {
+                expectedClass = Monk.MonkCatalog.MonkClass;
+                return expectedClass != null;
+            }
+            return false;
+        }
+
+        internal static State BeginMouse(ItemIcon icon,
             PointerEventData eventData, Class expectedClass,
             int requiredLevel)
         {
@@ -224,6 +270,61 @@ namespace ErenshorSkills.Items
             ItemIcon icon, float value)
         {
             try { field?.SetValue(icon, value); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// A single native input boundary owns custom-class book use. Keeping one
+    /// wrapper per ItemIcon method avoids loader-specific Harmony ordering and
+    /// state collisions while ordinary inventory, bank, and vendor clicks pass
+    /// through untouched.
+    /// </summary>
+    [HarmonyPatch(typeof(ItemIcon), nameof(ItemIcon.OnPointerUp))]
+    internal static class Patch_CustomClassSkillBookMouseUse
+    {
+        [HarmonyPrefix, HarmonyPriority(Priority.First)]
+        private static bool Prefix(ItemIcon __instance,
+            PointerEventData eventData, out CustomClassSkillBookUse.State __state)
+        {
+            __state = CustomClassSkillBookUse.BeginMouse(__instance,
+                eventData);
+            return !__state.Suppressed;
+        }
+
+        [HarmonyPostfix, HarmonyPriority(Priority.Last)]
+        private static void Postfix(CustomClassSkillBookUse.State __state) =>
+            CustomClassSkillBookUse.Complete(__state);
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Exception __exception,
+            CustomClassSkillBookUse.State __state)
+        {
+            CustomClassSkillBookUse.Restore(__state);
+            return __exception;
+        }
+    }
+
+    [HarmonyPatch(typeof(ItemIcon), "GamepadConsumeOrLoot")]
+    internal static class Patch_CustomClassSkillBookGamepadUse
+    {
+        [HarmonyPrefix, HarmonyPriority(Priority.First)]
+        private static bool Prefix(ItemIcon __instance,
+            out CustomClassSkillBookUse.State __state)
+        {
+            __state = CustomClassSkillBookUse.BeginGamepad(__instance);
+            return !__state.Suppressed;
+        }
+
+        [HarmonyPostfix, HarmonyPriority(Priority.Last)]
+        private static void Postfix(CustomClassSkillBookUse.State __state) =>
+            CustomClassSkillBookUse.Complete(__state);
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Exception __exception,
+            CustomClassSkillBookUse.State __state)
+        {
+            CustomClassSkillBookUse.Restore(__state);
+            return __exception;
         }
     }
 }

@@ -259,7 +259,7 @@ namespace ErenshorSkills.Necromancer
                 definition.Pbaoe;
             spell.NoResonate = definition.Kind != NecromancerSpellKind.Native ||
                 definition.Type == Spell.SpellType.Pet;
-            spell.SimUsable = false;
+            spell.SimUsable = !definition.HiddenEffect;
             spell.color = definition.VfxColor;
             spell.StatusEffectMessageOnPlayer = PlayerEffectMessage(definition);
             spell.StatusEffectMessageOnNPC = NpcEffectMessage(definition);

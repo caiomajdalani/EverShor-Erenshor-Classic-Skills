@@ -4,7 +4,7 @@ An EverQuest-inspired skills and tradeskills mod for [Erenshor](https://store.st
 
 ## Compatibility
 
-Version **1.8.2** is built and tested for Erenshor Steam build **24405256**
+Version **1.8.4** is built and tested for Erenshor Steam build **24405256**
 (installed July 25, 2026). It supports either **BepInEx 5** or Lunaris through Lunaris's
 legacy-plugin wrapper, including the current auto-updated Lunaris 0.1.9 runtime.
 Attack Sync Fix is included; do **not** install the standalone Attack Sync Fix
@@ -239,14 +239,11 @@ bonus class.
   restart, and resummoning. A full inventory blocks a return without deleting
   or duplicating either item.
 - Spell merchants in Stowaway's Step, Willowwatch, and Port Azure—Ossira the
-  Bone Reader, Morthane the Grave Tutor, and Veyra of the Azure Crypt—sell the
-  level-sorted vendor portion of the kit plus all five auras. Eight high-level
-  scrolls instead drop from 24 named/boss sources, including three Planar raid
-  drops, so the class participates in native spell acquisition progression.
-  Each Necromancer trainer is anchored beside that city's native Arcanist
-  trainer rather than an unrelated merchant. Like the Monk trainers, these
-  merchants never stock a weapon or armor piece above level 10; charms, auras,
-  and scrolls remain purchasable at every tier.
+  Bone Reader, Morthane the Grave Tutor, and Veyra of the Azure Crypt—provide
+  a tiered progression. Beginner-zone Ossira stops at level 10, Morthane
+  teaches through level 26, and Veyra carries the advanced catalog through
+  level 35. Each trainer is anchored beside that city's native Arcanist
+  trainer rather than an unrelated merchant.
 - Five native Ascension perks are available on the Necromancer class tab:
   Grave Mastery, Virulent Afflictions, Bone Sovereignty, Unyielding Affliction,
   and Swift Decay. Their ranks use Erenshor's native save and effect paths.
@@ -455,6 +452,7 @@ it only on a backed-up test character. Disable it again for normal play.
 | `/cstest logs` | Capture the native menu buttons, Extra Settings pages, all configured log colors, and damage-type labels |
 | `/cstest icons` | Validate and capture all 280 crafted output icons in six labeled in-game catalogs |
 | `/cstest simitems` | Reversibly live-test SimPlayer crafted armor, offhand gear, Food, Drink, save IDs, and quantities |
+| `/cstest simclasses` | Validate persistent Necromancer and Monk SimPlayers, native save fallbacks, combat kits, roles, and class chatter |
 | `/cstest necro <status\|class\|level\|learn\|cast\|castall\|vfx\|icons\|aura\|gear\|ascension\|petgear\|petrole\|epic\|travel\|vendor>` | Validate Necromancer creation, level-1–35 balance, spells, VFX, acquisition, Ascensions, gear, pets, and merchants on John EverQuest |
 | `/cstest monk <status\|class\|levels\|learn\|icons\|vfx\|motions\|mechanics\|auras\|gear\|ascensions\|vendor>` | Validate Monk creation, level-1–35 progression, unique art, contact-timed VFX, all body motions, native damage mechanics, auras, new gear, Ascensions, and trainers on John EverQuest |
 | `/cstest monk autoattack [side]` | Exercise repeated primary-weapon attacks and verify the matched two-hand punch sequence without weapon-state leaks |

@@ -456,7 +456,12 @@ namespace ErenshorSkills.Monk
             spell.NoResonate = true;
             spell.AutomateAttack = definition.IsOffensive;
             spell.MyDamageType = GameData.DamageType.Physical;
-            spell.SimUsable = false;
+            // Sim Monks are a DPS role. Utility techniques currently carry
+            // player-facing messages and short-lived state owned by the local
+            // player runtime, so AI may use only offensive techniques. This
+            // still gives Sim Monks their full authored strike progression
+            // without leaking "You..." messages or shared stance timers.
+            spell.SimUsable = definition.IsOffensive;
             spell.SpellIcon = GetSkill(definition.Key)?.SkillIcon;
             spell.StatusEffectToApply =
                 string.IsNullOrEmpty(definition.EffectKey)

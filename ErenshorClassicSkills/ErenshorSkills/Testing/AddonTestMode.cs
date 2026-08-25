@@ -427,6 +427,7 @@ namespace ErenshorSkills.Testing
                 case "bagtransfers": TestBagTransfers(); break;
                 case "dumpdb": DatabaseDumper.DumpAll(); break;
                 case "simitems": TestSimPlayerCraftedItems(); break;
+                case "simclasses": TestCustomClassSimPlayers(); break;
                 case "enterqa": StartQaWorldBootstrap(); break;
                 case "necromancer":
                 case "necro": TestNecromancer(remainder); break;
@@ -452,6 +453,19 @@ namespace ErenshorSkills.Testing
             ChatHelper.Send(
                 $"<color={(passed ? "#4CAF50" : "#EF5350")}>" +
                 $"[Test Mode] Custom class identity {result}: {detail}</color>");
+        }
+
+        private static void TestCustomClassSimPlayers()
+        {
+            bool passed = Features.CustomClassSimPlayers.RunSelfTest(
+                out string detail);
+            string result = passed ? "PASS" : "FAIL";
+            SkillsPlugin.Log.LogInfo(
+                $"Custom class SimPlayer QA {result}: {detail}");
+            ChatHelper.Send(
+                $"<color={(passed ? "#4CAF50" : "#EF5350")}>" +
+                $"[Test Mode] Custom class SimPlayers {result}: " +
+                $"{detail}</color>");
         }
 
         private static void ShowHelp()
@@ -481,6 +495,7 @@ namespace ErenshorSkills.Testing
             ChatHelper.Send("/cstest bagtransfers - audit filled-bag bank deposit/reload/withdrawal/rollback plus Sim, vendor, and trash conservation");
             ChatHelper.Send("/cstest dumpdb - export current databases and all prefab spell-acquisition sources");
             ChatHelper.Send("/cstest simitems - live-test crafted gear plus quantity-backed SimPlayer food and drink");
+            ChatHelper.Send("/cstest simclasses - verify persistent Necromancer and Monk Sims, combat kits, roles, native fallbacks, and chatter");
             ChatHelper.Send("/cstest enterqa - enter the isolated John EverQuest QA character without mouse input");
             ChatHelper.Send("/cstest necro &lt;status|skills|class|learn|cast|castall|vfx|icons|aura [verify]|gear [verify]|ascension|petgear|petrole|epic|travel|vendor [capture]|dps [quick|full|progression|progression-sustained|progression-quick|level N [quick|balance|full]]&gt; - verify the Necromancer class, shared Arcanist combat skills, unique icons, auras, class gear, epic drops, native charm forge, vendors, durable pet role, and visuals as John EverQuest");
             ChatHelper.Send("/cstest monk &lt;status|class|level 1-35|learn|skills|icons|vfx [NAME|all]|animations|capture [NAME|strikes|all]|use NAME|mechanics [NAME|all]|dps [quick|timescale|audit]|gear [verify]|aura [verify]|ascension|vendor [open]|smoke&gt; - targeted QA for newly added Monk content only, including bespoke punch/kick VFX and comparative level/gear DPS audits");

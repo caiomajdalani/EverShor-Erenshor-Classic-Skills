@@ -4,7 +4,7 @@
     <TargetFramework>netstandard2.1</TargetFramework>
     <AssemblyName>ErenshorClassicSkills</AssemblyName>
     <RootNamespace>ErenshorSkills</RootNamespace>
-    <Version>1.8.2</Version>
+    <Version>1.8.4</Version>
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
 

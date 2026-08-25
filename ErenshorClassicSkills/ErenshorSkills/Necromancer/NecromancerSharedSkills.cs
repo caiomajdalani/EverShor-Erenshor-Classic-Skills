@@ -359,6 +359,8 @@ namespace ErenshorSkills.Necromancer
                 ExerciseUsePath(gamepadDefinition, useMouse: false, known,
                     classBefore, errors);
 
+                ExerciseOrdinaryInventoryClick(scratch, errors);
+
                 Item tooltipBook = ResolveBook(mouseDefinition);
                 if (tooltipBook == null || GameData.ItemInfoWindow == null)
                     errors.Add("native tooltip window or probe book unavailable");
@@ -416,10 +418,47 @@ namespace ErenshorSkills.Necromancer
                 ? "real ItemIcon mouse and gamepad book-use paths denied one " +
                   "level early, learned and consumed at the exact Arcanist " +
                   "level without changing the player class, and rendered " +
-                  "one idempotent Necromancer tooltip requirement; all QA " +
-                  "state rolled back"
+                  "one idempotent Necromancer tooltip requirement; an " +
+                  "ordinary left-click still reached native cursor pickup; " +
+                  "all QA state rolled back"
                 : string.Join("; ", errors);
             return errors.Count == 0;
+        }
+
+        private static void ExerciseOrdinaryInventoryClick(ItemIcon slot,
+            List<string> errors)
+        {
+            Item probe = GameData.ItemDB?.ItemDB?.FirstOrDefault(item =>
+                item != null && item != GameData.PlayerInv.Empty &&
+                item.RequiredSlot == Item.SlotType.General &&
+                item.TeachSpell == null && item.TeachSkill == null &&
+                item.ItemEffectOnClick == null);
+            if (probe == null)
+            {
+                errors.Add("ordinary inventory click probe item unavailable");
+                return;
+            }
+
+            slot.MyItem = probe;
+            slot.Quantity = 1;
+            slot.UpdateSlotImage();
+            GameData.MouseSlot.MyItem = GameData.PlayerInv.Empty;
+            GameData.MouseSlot.Quantity = 1;
+            GameData.MouseSlot.dragging = false;
+            GameData.ItemOnCursor = null;
+            GameData.HighlightedItem = slot;
+            var pointer = new UnityEngine.EventSystems.PointerEventData(
+                UnityEngine.EventSystems.EventSystem.current)
+            {
+                button = UnityEngine.EventSystems.PointerEventData
+                    .InputButton.Left
+            };
+            slot.OnPointerDown(pointer);
+            slot.OnPointerUp(pointer);
+            if (!ReferenceEquals(GameData.ItemOnCursor, slot) ||
+                !GameData.MouseSlot.dragging ||
+                !ReferenceEquals(GameData.MouseSlot.MyItem, probe))
+                errors.Add("ordinary inventory left-click was intercepted");
         }
 
         private static void ExerciseUsePath(Definition definition,
