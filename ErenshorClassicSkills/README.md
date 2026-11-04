@@ -1,75 +1,32 @@
-# Evershor - Classic Skills
+# EverShor - Classic Skills, Classes and Features
 
 An EverQuest-inspired skills and tradeskills mod for [Erenshor](https://store.steampowered.com/app/2382520/Erenshor/). Adds 25 trackable skills, 6 tradeskills with 280 recipes, 4 magic schools, a full material economy, and balanced playable Necromancer and Monk classes.
 
 ## Compatibility
 
-Version **1.8.4** is built and tested for Erenshor Steam build **24405256**
-(installed July 25, 2026). It supports either **BepInEx 5** or Lunaris through Lunaris's
-legacy-plugin wrapper, including the current auto-updated Lunaris 0.1.9 runtime.
-Attack Sync Fix is included; do **not** install the standalone Attack Sync Fix
-DLL at the same time.
+**Proposed 1.9.0 is based on upstream 1.8.4.** The inherited local reference set identifies Steam build `24405256`; see [reference hashes](../docs/reference-assemblies.json) and [validation limits](../docs/VALIDATION.md). References are supplied locally, not checked in.
 
-## Developer MCP server
+This is the **native Lunaris API** build. The plugin derives from `LunarisPlugin`, uses native `Config.Register<T>()` settings and Lunaris command attributes, and requests the Harmony permission. BepInEx is not required and the plugin is no longer compiled against the BepInEx API. Do not install a second copy under `BepInEx/plugins/`.
 
-The local stdio server in [`mcp-server/`](mcp-server/) supports the complete
-agent development loop: installed-game API discovery, build/reference refresh,
-guarded BepInEx or Lunaris installation, Steam launch, `/cstest` queueing, and
-report/log/screenshot inspection. See [`MCP_SERVER.md`](MCP_SERVER.md) for the
-project review and architecture, then [`mcp-server/README.md`](mcp-server/README.md)
-for setup and Codex registration.
+Attack Sync Fix is included; do **not** install the standalone Attack Sync Fix DLL at the same time.
+
+## Developer build
+
+Use .NET SDK 8 and supply game/Unity/Lunaris/Harmony references locally. See [BUILDING.md](../docs/BUILDING.md). Run `./build.ps1` on Windows or `./build.sh` with Bash. From the repository root, run `./scripts/Validate.ps1` for the automated checks. The Bash installer compares the target game assembly to the local build reference; different game branches require explicit compatibility review.
+
+The output is `ErenshorSkills/bin/Release/netstandard2.1/ErenshorClassicSkills.dll`. `Lunaris.dll` and `0Harmony.dll` are compile-time references only and must not be copied beside the plugin; Lunaris supplies them at runtime.
 
 ## Installation
 
-Choose **one** loader. Do not run BepInEx and Lunaris bootstraps together.
+1. Install and launch [Lunaris](https://github.com/MizukiBelhi/Lunaris) once so it creates the `plugins` directory.
+2. Close Erenshor.
+3. Copy `ErenshorClassicSkills.dll` into `<Erenshor game folder>/plugins/`.
+4. Start Erenshor, open the Lunaris plugin manager, and enable **EverShor - Classic Skills, Classes and Features**.
+5. Restart Erenshor once after enabling the plugin, then enter a character. Enabling before loading a character is recommended so the game resolves the mod's custom `CS_` item IDs during its native load.
 
-### BepInEx 5
+There must be only one installed copy: `plugins/ErenshorClassicSkills.dll`. Remove older Classic Skills DLLs from `BepInEx/plugins/` or other plugin directories before enabling this native build.
 
-1. **Install BepInEx 5** for Erenshor if you haven't already:
-   - Download [BepInEx 5.x](https://github.com/BepInEx/BepInEx/releases) (Unity Mono version)
-   - Extract into your Erenshor game folder (`Steam/steamapps/common/Erenshor/`)
-   - Run the game once to generate BepInEx folders, then close it
-
-2. **Install ErenshorClassicSkills:**
-   - Extract the zip into your Erenshor game folder
-   - Your folder structure should look like:
-     ```
-     Erenshor/
-     └── BepInEx/
-         └── plugins/
-             ├── ErenshorClassicSkills.dll
-             └── ClassicSkills/
-                 └── Icons/
-     ```
-   - Icons and station models are embedded in the DLL. The packaged icon
-     directory also replaces older external overrides during an upgrade.
-
-3. **Launch the game.** The mod generates its config on first run.
-
-### Lunaris
-
-1. Install and launch [Lunaris](https://github.com/MizukiBelhi/Lunaris) once.
-2. Remove any older Classic Skills DLL from `Erenshor/plugins/`. Extract the
-   Lunaris ZIP into the Erenshor game directory so it installs
-   `plugins/ErenshorClassicSkills.dll` and `plugins/ClassicSkills/Icons/`.
-   A standalone DLL also works on a fresh installation; when upgrading an old
-   external icon pack, use the ZIP so the new production icons replace it.
-3. Make sure there is only one copy of Classic Skills installed. Do not also
-   leave it in `BepInEx/plugins/`, and do not install the standalone Attack Sync
-   Fix DLL because that fix is already included.
-4. At the main menu, open Lunaris's plugin installer, or use
-   `/lunaris plugins` in game, and enable **Erenshor Classic Skills**.
-5. Restart Erenshor once after enabling the addon, then enter a character.
-
-Manually installed Lunaris plugins begin disabled. Enable Classic Skills before
-entering a character whenever possible so Erenshor resolves its `CS_` item IDs
-during the native load. If it is first enabled while a character is already in
-the world, the addon performs a guarded recovery using the last valid native
-backup plus its inventory sidecar. A fresh Lunaris install stores addon data in
-`Erenshor/plugins/config/ClassicSkills/`; BepInEx uses
-`Erenshor/BepInEx/config/ClassicSkills/`. When changing loaders, Classic Skills
-automatically follows whichever of those locations already contains its durable
-JSON data so skill, recipe, bag, and inventory recovery data are not split.
+The mod's durable character data remains in `plugins/config/ClassicSkills/`. The path resolver can still detect an older `BepInEx/config/ClassicSkills/` data directory to avoid orphaning existing JSON saves; this is data migration only, not BepInEx runtime compatibility. Native Lunaris configuration is stored and managed by Lunaris; legacy BepInEx option values are not automatically imported, so review the plugin's Options after migrating.
 
 ---
 
@@ -185,8 +142,8 @@ Erenshor's native sell, trash, and bank paths.
 
 ### Optional Corpse Run
 
-Corpse Run is disabled by default. Enable it with `/corpserun on`, BepInEx's
-`Corpse Run.Enabled=true`, or Lunaris's `CorpseRunEnabled` option to leave your carried inventory, equipped gear,
+Corpse Run is disabled by default. Enable it in Lunaris Options with
+`CorpseRunEnabled=true` (or with `/corpserun on`) to leave your carried inventory, equipped gear,
 cosmetics, aura, charm, crafted-bag contents, and gold on death.
 
 - The corpse is a static copy of the character as they looked at death, including
@@ -223,21 +180,18 @@ bonus class.
   layers irregular, organic edges instead of repeated procedural circles.
 - New Necromancers begin with both a Rusty Dagger and Rusty Shortsword so one
   weapon can be placed in the Thrall Bag for the first summoned pet.
-- Bone Thralls use Erenshor's skeletal companion model. Weapons and shields can
-  be handed to a thrall through the native trade window and visibly appear in
-  the correct hands while contributing their real damage, armor, stats, and
-  upgrade quality. Bow-equipped thralls hold ranged distance, fire native arrow
-  projectiles, and visibly draw and release instead of closing to melee range.
-- Bone Thralls prefer Erenshor's bare `Summoned Skeleton` model and use a
-  level-1–35 stat curve benchmarked below comparable native Druid pets. Gear
-  contributions are tier-bounded so heavily upgraded items cannot make a
-  low-tier thrall overpower native companions. Their navigation speed follows
-  the owner's effective movement speed instead of using the native nearby-pet
-  half-speed behavior.
-- Pet equipment is held in crash-safe character escrow. Exact item identity,
-  raw quality, and mod-added scalar state survive zoning, dismissal, death,
-  restart, and resummoning. A full inventory blocks a return without deleting
-  or duplicating either item.
+- Bone Thralls use skeleton visuals and accept slot-validated equipment,
+  including Aura and Charm. Weapons, armor, attributes and item quality contribute
+  to their combat values. Equipment visuals use guarded rig mapping.
+- Tier-specific attacks supplement gear: Bone Rake, Sentry's Rebuke, Grave Siphon,
+  Crypt Breaker and Ossuary Verdict. They do not copy the player's learned spells.
+- Direct taunt: 1.25 s; area taunt: 2 s within 12 m, only for NPCs already fighting
+  the owner/Thrall. Slow begins at tier 2 (11 s cooldown); stun at tier 3 (15 s).
+- Bow-equipped Thralls retain the ranged projectile path. Movement follows the
+  owner's effective movement speed. Balance and visuals require game validation.
+- Equipment is persisted through character-scoped escrow/Thrall Bag handling.
+  Verify zoning, dismissal, death, restart, full-inventory returns and rollback
+  using the manual validation matrix before treating migration as release-ready.
 - Spell merchants in Stowaway's Step, Willowwatch, and Port Azure—Ossira the
   Bone Reader, Morthane the Grave Tutor, and Veyra of the Azure Crypt—provide
   a tiered progression. Beginner-zone Ossira stops at level 10, Morthane
@@ -261,9 +215,8 @@ bonus class.
 - Necromancer action notices are written to the combat log in a consolidated
   format without repeating a `Necromancer` label in ordinary chat.
 
-Set BepInEx's `Necromancer.Enabled=false` or turn off Lunaris's
-`NecromancerEnabled` option before starting the game if the class and its vendors
-should not be added.
+Turn off `NecromancerEnabled` in Lunaris Options before starting the game if
+the class and its vendors should not be added.
 
 ### Playable Monk
 
@@ -357,8 +310,8 @@ Necromancer rather than modifying any base class.
   gear, followed by 39/39 focused verification parses and 24/24 final balance
   guards. Raid-drop spells were excluded and no native class value was changed.
 
-Set BepInEx's `Monk.Enabled=false` or turn off Lunaris's `MonkEnabled` option
-before starting the game if the class and its trainers should not be added.
+Turn off `MonkEnabled` in Lunaris Options before starting the game if the class
+and its trainers should not be added.
 
 ---
 
@@ -420,17 +373,17 @@ Materials come from gameplay — no vendor shortcuts for valuable resources.
 
 | Command | Description |
 |---|---|
-| `/skills` | Overview of all skill levels |
+| `/skills` | Overview of all skill levels (existing chat command) |
+| `/erenshorclassicskills skills` | Native Lunaris command for the skill overview |
+| `/erenshorclassicskills extrasettings` | Open the chat and combat-log settings |
 | `/smith list`, `/bake list`, etc. | List known recipes |
 | `/meditate` | Explain automatic meditation requirements |
 
 ### Controlled Test Mode
 
-Test mode is disabled by default. With BepInEx, set
-`Testing.EnableTestMode=true` in
-`BepInEx/config/com.erenshor.classicskills.cfg`. With Lunaris, enable
-`EnableTestMode` from Classic Skills' **Options** page. Restart Erenshor and use
-it only on a backed-up test character. Disable it again for normal play.
+Test mode is disabled by default. Enable `EnableTestMode` from Classic Skills'
+**Options** page in Lunaris. Restart Erenshor and use it only on a backed-up test
+character. Disable it again for normal play.
 
 | Command | Description |
 |---|---|
@@ -489,11 +442,10 @@ icon is hidden automatically when its skill is disabled.
 
 ## Configuration
 
-BepInEx settings use
-`BepInEx/config/com.erenshor.classicskills.cfg`. Under Lunaris, open the plugin
-installer, select **Erenshor Classic Skills**, and use **Options**; Lunaris backs
-those settings with `plugins/config/erenshorclassicskills.lpcfg`, which is not a
-text file and should not be edited by hand.
+Open the Lunaris plugin manager, select **Erenshor Classic Skills**, and use
+**Options**. The native settings model is registered using
+`Config.Register<ClassicSkillsSettings>()`; Lunaris owns persistence for those
+options, so the backing config should not be edited by hand.
 
 Key settings:
 - `SkillWindowKey` — Keybind to open Skills window (default: F8)
@@ -505,9 +457,9 @@ Key settings:
 - `AbjurationDurationPerLevel` — Buff-duration multiplier increment per Abjuration level (default: 0.003, or 0.3%)
 - `ConjurationDamagePerLevel` — DoT and summoned-pet damage multiplier increment per Conjuration level (default: 0.0008, or 0.08%)
 - **Extra Settings** — Change each chat/combat-log category color and toggle resolved damage-type labels in game
-- `Corpse Run.Enabled` / Lunaris `CorpseRunEnabled` — Leave a recoverable character corpse and protected Corpse Bag on death (default: false)
-- `Necromancer.Enabled` / Lunaris `NecromancerEnabled` — Add the playable Necromancer, spells, armed Bone Thralls, and city spell merchants (default: true)
-- `Monk.Enabled` / Lunaris `MonkEnabled` — Add the playable Monk, animated martial techniques, auras, class gear, and city trainers (default: true)
+- `CorpseRunEnabled` — Leave a recoverable character corpse and protected Corpse Bag on death (default: false)
+- `NecromancerEnabled` — Add the playable Necromancer, spells, armed Bone Thralls, and city spell merchants (default: true)
+- `MonkEnabled` — Add the playable Monk, animated martial techniques, auras, class gear, and city trainers (default: true)
 - `EnableTestMode` — Enable controlled `/cstest` commands (default: false)
 - Individual toggles for Fishing, Swimming, Meditate, Foraging, etc.
 
@@ -516,5 +468,5 @@ Key settings:
 ## Credits
 
 - **Mod by**: Sovietpremier(Thurderan)
-- **Built with**: BepInEx 5 legacy API and HarmonyX; tested with BepInEx and Lunaris
+- **Built with**: Lunaris native API, Harmony, Erenshor and Unity reference assemblies
 - **For**: [Erenshor](https://store.steampowered.com/app/2382520/Erenshor/) by Burgee Media
