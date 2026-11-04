@@ -11,7 +11,7 @@ namespace ErenshorSkills.UI
 {
     /// <summary>
     /// Native-styled in-game editor for EverQuest-style chat and combat-log
-    /// presentation. Changes are written through the existing BepInEx/Lunaris
+    /// presentation. Changes are written through the native Lunaris
     /// config entries immediately; no separate save format is introduced.
     /// </summary>
     internal sealed class LogDisplaySettingsUI : MonoBehaviour

@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
-using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
 
@@ -68,69 +67,81 @@ namespace ErenshorSkills.Features
         internal static ConfigEntry<bool> EnableCustomColors { get; private set; }
         internal static ConfigEntry<bool> ShowDamageTypes { get; private set; }
 
-        internal static void BindConfig(ConfigFile config)
+        internal static void BindConfig(ClassicSkillsSettings settings)
         {
-            EnableCustomColors = config.Bind("Chat and Combat Log",
-                "EnableCustomLogColors", false,
-                "Use the per-message-type colors below in chat and combat logs. Disable this to preserve all native Erenshor colors.");
-            ShowDamageTypes = config.Bind("Chat and Combat Log",
-                "ShowDamageTypes", false,
-                "Append the resolved damage school to damage messages, such as [Physical], [Elemental], or [Void].");
+            EnableCustomColors = SkillsPlugin.CreateConfigEntry(nameof(settings.EnableCustomLogColors), () => settings.EnableCustomLogColors, v => settings.EnableCustomLogColors = v);
+            ShowDamageTypes = SkillsPlugin.CreateConfigEntry(nameof(settings.ShowDamageTypes), () => settings.ShowDamageTypes, v => settings.ShowDamageTypes = v);
 
             ColorRules.Clear();
-            BindColor(config, ChatLogLine.LogType.Say, "Say", "#F2F2F2");
-            BindColor(config, ChatLogLine.LogType.Shout, "Shout", "#FF9D3D");
-            BindColor(config, ChatLogLine.LogType.Whisper, "Whisper", "#FF75D8");
-            BindColor(config, ChatLogLine.LogType.Party, "Party", "#55E6E6");
-            BindColor(config, ChatLogLine.LogType.Guild, "Guild", "#55E0A4");
-            BindColor(config, ChatLogLine.LogType.Raid, "Raid", "#FF8766");
-            BindColor(config, ChatLogLine.LogType.WTB, "TradeWTB", "#FFD24A");
-            BindColor(config, ChatLogLine.LogType.PlayerHits,
-                "YourMeleeDamage", "#F2F2F2");
-            BindColor(config, ChatLogLine.LogType.PlayerSpellResults,
-                "YourSpellDamage", "#84C8FF");
-            BindColor(config, ChatLogLine.LogType.OthersHits,
-                "OtherDamage", "#BDBDBD");
-            BindColor(config, ChatLogLine.LogType.PlayerGetHit,
-                "DamageToYou", "#FF6666");
-            BindColor(config, ChatLogLine.LogType.MyHealing,
-                "YourHealing", "#66F28A");
-            BindColor(config, ChatLogLine.LogType.OtherHealing,
-                "OtherHealing", "#68C982");
-            BindColor(config, ChatLogLine.LogType.HealsOnMe,
-                "HealingOnYou", "#8CFFB7");
-            BindColor(config, ChatLogLine.LogType.SpellEmotes,
-                "SpellEmotes", "#CAA8FF");
-            BindColor(config, ChatLogLine.LogType.SpellResults,
-                "OtherSpellResults", "#B9A7FF");
-            BindColor(config, ChatLogLine.LogType.SystemMessages,
-                "SystemMessages", "#FFF176");
-            BindColor(config, ChatLogLine.LogType.NPCEmotes,
-                "NPCEmotes", "#D0D0D0");
-            BindColor(config, ChatLogLine.LogType.ZoneEmotes,
-                "ZoneEmotes", "#FFD37A");
-            BindColor(config, ChatLogLine.LogType.BattleMechanicText,
-                "BattleMechanics", "#FF704F");
-            BindColor(config, ChatLogLine.LogType.FactionHits,
-                "FactionChanges", "#FFCC66");
-            BindColor(config, ChatLogLine.LogType.TargetInfo,
-                "TargetInfo", "#80E8FF");
-            BindColor(config, ChatLogLine.LogType.GroupMemberRequestsLoot,
-                "LootRequests", "#D5A6FF");
+            BindColor(ChatLogLine.LogType.Say, "Say", "#F2F2F2",
+                () => settings.LogColorSay, value => settings.LogColorSay = value);
+            BindColor(ChatLogLine.LogType.Shout, "Shout", "#FF9D3D",
+                () => settings.LogColorShout, value => settings.LogColorShout = value);
+            BindColor(ChatLogLine.LogType.Whisper, "Whisper", "#FF75D8",
+                () => settings.LogColorWhisper, value => settings.LogColorWhisper = value);
+            BindColor(ChatLogLine.LogType.Party, "Party", "#55E6E6",
+                () => settings.LogColorParty, value => settings.LogColorParty = value);
+            BindColor(ChatLogLine.LogType.Guild, "Guild", "#55E0A4",
+                () => settings.LogColorGuild, value => settings.LogColorGuild = value);
+            BindColor(ChatLogLine.LogType.Raid, "Raid", "#FF8766",
+                () => settings.LogColorRaid, value => settings.LogColorRaid = value);
+            BindColor(ChatLogLine.LogType.WTB, "TradeWTB", "#FFD24A",
+                () => settings.LogColorTradeWTB, value => settings.LogColorTradeWTB = value);
+            BindColor(ChatLogLine.LogType.PlayerHits, "YourMeleeDamage", "#F2F2F2",
+                () => settings.LogColorYourMeleeDamage, value => settings.LogColorYourMeleeDamage = value);
+            BindColor(ChatLogLine.LogType.PlayerSpellResults, "YourSpellDamage", "#84C8FF",
+                () => settings.LogColorYourSpellDamage, value => settings.LogColorYourSpellDamage = value);
+            BindColor(ChatLogLine.LogType.OthersHits, "OtherDamage", "#BDBDBD",
+                () => settings.LogColorOtherDamage, value => settings.LogColorOtherDamage = value);
+            BindColor(ChatLogLine.LogType.PlayerGetHit, "DamageToYou", "#FF6666",
+                () => settings.LogColorDamageToYou, value => settings.LogColorDamageToYou = value);
+            BindColor(ChatLogLine.LogType.MyHealing, "YourHealing", "#66F28A",
+                () => settings.LogColorYourHealing, value => settings.LogColorYourHealing = value);
+            BindColor(ChatLogLine.LogType.OtherHealing, "OtherHealing", "#68C982",
+                () => settings.LogColorOtherHealing, value => settings.LogColorOtherHealing = value);
+            BindColor(ChatLogLine.LogType.HealsOnMe, "HealingOnYou", "#8CFFB7",
+                () => settings.LogColorHealingOnYou, value => settings.LogColorHealingOnYou = value);
+            BindColor(ChatLogLine.LogType.SpellEmotes, "SpellEmotes", "#CAA8FF",
+                () => settings.LogColorSpellEmotes, value => settings.LogColorSpellEmotes = value);
+            BindColor(ChatLogLine.LogType.SpellResults, "OtherSpellResults", "#B9A7FF",
+                () => settings.LogColorOtherSpellResults, value => settings.LogColorOtherSpellResults = value);
+            BindColor(ChatLogLine.LogType.SystemMessages, "SystemMessages", "#FFF176",
+                () => settings.LogColorSystemMessages, value => settings.LogColorSystemMessages = value);
+            BindColor(ChatLogLine.LogType.NPCEmotes, "NPCEmotes", "#D0D0D0",
+                () => settings.LogColorNPCEmotes, value => settings.LogColorNPCEmotes = value);
+            BindColor(ChatLogLine.LogType.ZoneEmotes, "ZoneEmotes", "#FFD37A",
+                () => settings.LogColorZoneEmotes, value => settings.LogColorZoneEmotes = value);
+            BindColor(ChatLogLine.LogType.BattleMechanicText, "BattleMechanics", "#FF704F",
+                () => settings.LogColorBattleMechanics, value => settings.LogColorBattleMechanics = value);
+            BindColor(ChatLogLine.LogType.FactionHits, "FactionChanges", "#FFCC66",
+                () => settings.LogColorFactionChanges, value => settings.LogColorFactionChanges = value);
+            BindColor(ChatLogLine.LogType.TargetInfo, "TargetInfo", "#80E8FF",
+                () => settings.LogColorTargetInfo, value => settings.LogColorTargetInfo = value);
+            BindColor(ChatLogLine.LogType.GroupMemberRequestsLoot, "LootRequests", "#D5A6FF",
+                () => settings.LogColorLootRequests, value => settings.LogColorLootRequests = value);
         }
 
-        private static void BindColor(ConfigFile config,
-            ChatLogLine.LogType type, string label, string defaultColor)
+        internal static void Reset()
         {
+            EnableCustomColors = null;
+            ShowDamageTypes = null;
+            ColorRules.Clear();
+            DamageEvents.Clear();
+            WarnedInvalidColors.Clear();
+        }
+
+        private static void BindColor(ChatLogLine.LogType type, string label,
+            string defaultColor, Func<string> read, Action<string> write)
+        {
+            string key = "LogColor" + label;
+            ConfigEntry<string> entry = SkillsPlugin.CreateConfigEntry(key, read, write);
             ColorRules.Add(new ColorRule
             {
                 Type = type,
                 Label = label,
                 DisplayName = GetDisplayName(label),
                 DefaultColor = defaultColor,
-                Entry = config.Bind("Chat and Combat Log Colors",
-                    "LogColor" + label, defaultColor,
-                    $"Color for {DescribeLogType(type)} messages. Use #RRGGBB, #RRGGBBAA, a supported color name, or leave blank to retain that message's native color.")
+                Entry = entry
             });
         }
 

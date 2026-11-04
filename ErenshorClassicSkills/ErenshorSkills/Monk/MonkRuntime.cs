@@ -1151,7 +1151,9 @@ namespace ErenshorSkills.Monk
         internal static void ResetCharacterState()
         {
             Character player = GameData.PlayerControl?.Myself;
-            if (player?.Alive == true)
+            // Unity objects can compare CLR-non-null after destruction, so
+            // null-conditional access is not sufficient during scene teardown.
+            if (player != null && player.Alive)
             {
                 Animator animator = player.GetComponent<Animator>();
                 animator?.SetBool("Dead", false);

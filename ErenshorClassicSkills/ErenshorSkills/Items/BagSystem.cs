@@ -2,9 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
-using BepInEx;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
@@ -72,9 +72,9 @@ namespace ErenshorSkills.Items
             { "Herbalist's Satchel", 6 },
             { "Simple Backpack", 8 },
             { "Adventurer's Backpack", 10 },
-            // Four visible cells match the requested EQ-style container. Legal
-            // thrall loadouts still contain at most two equipped objects.
-            { ThrallBagName, 4 },
+            // Thrall Bag capacity is resolved from the player's normal carried
+            // inventory at runtime, so it can mirror the character inventory.
+            { ThrallBagName, 10 },
             // Recovery containers are seeded internally.  Their visible size
             // expands to the exact number of recovered item records.
             { CorpseBagName, 1 },
@@ -149,7 +149,27 @@ namespace ErenshorSkills.Items
             CorpseBagName, StringComparison.OrdinalIgnoreCase);
         public static bool IsThrallBag(string n) => string.Equals(n,
             ThrallBagName, StringComparison.OrdinalIgnoreCase);
-        public static int GetBagSlots(string n) => BagDefs.TryGetValue(n, out int s) ? s : 0;
+        public static int GetBagSlots(string n)
+        {
+            if (IsThrallBag(n))
+                return Mathf.Max(1, GetThrallEquipmentSlots().Count);
+            return BagDefs.TryGetValue(n, out int s) ? s : 0;
+        }
+
+        internal static List<ItemIcon> GetThrallEquipmentSlots()
+        {
+            var result = new List<ItemIcon>();
+            var seen = new HashSet<ItemIcon>();
+            Inventory inventory = GameData.PlayerInv;
+            if (inventory?.EquipmentSlots != null)
+                foreach (ItemIcon slot in inventory.EquipmentSlots)
+                    if (slot != null && seen.Add(slot)) result.Add(slot);
+            if (inventory?.AuraSlot != null && seen.Add(inventory.AuraSlot))
+                result.Add(inventory.AuraSlot);
+            if (inventory?.CharmSlot != null && seen.Add(inventory.CharmSlot))
+                result.Add(inventory.CharmSlot);
+            return result;
+        }
 
         internal static bool IsCorpseBagId(string bagId)
         {
@@ -590,6 +610,35 @@ namespace ErenshorSkills.Items
                 return false;
 
             List<BagSlotData> contents = GetBagContents(bagId);
+            if (entry.IsStackable)
+            {
+                BagSlotData existing = null;
+                foreach (BagSlotData slot in contents)
+                    if (slot != null && slot.IsStackable &&
+                        string.Equals(slot.ItemId, entry.ItemId,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(slot.ItemName, entry.ItemName,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        existing = slot;
+                        break;
+                    }
+                if (existing != null)
+                {
+                    if (existing.Quantity > int.MaxValue - entry.Quantity)
+                    {
+                        reason = "that stack is too large";
+                        return false;
+                    }
+                    int oldQuantity = existing.Quantity;
+                    existing.Quantity += entry.Quantity;
+                    if (Necromancer.NecromancerPetEquipment.TryApplyThrallBagContents(
+                        bagId, contents, out gearBefore, out gearAfter, out reason))
+                        return true;
+                    existing.Quantity = oldQuantity;
+                    return false;
+                }
+            }
             if (contents.Count >= GetBagSlots(ThrallBagName))
             {
                 reason = "the Thrall Bag is full";
@@ -675,8 +724,7 @@ namespace ErenshorSkills.Items
             if (thrallBag)
                 Necromancer.NecromancerPets.ApplyEscrowToActivePet();
             ChatHelper.Send($"<color=#4CAF50>[{(thrallBag ? "Thrall Bag" : "Bag")}]</color> " +
-                $"Stored {item.ItemName} in {bagName}" +
-                (thrallBag ? "; your thrall equipped it." : "."));
+                $"Stored {item.ItemName} in {bagName}.");
             BagWindow.RefreshAll();
             return true;
         }
@@ -774,8 +822,7 @@ namespace ErenshorSkills.Items
                 Necromancer.NecromancerPets.ApplyEscrowToActivePet();
             ChatHelper.Send(
                 $"<color=#4CAF50>[{(thrallBag ? "Thrall Bag" : "Bag")}]</color> " +
-                $"Stored {item.ItemName} in {bagName}" +
-                (thrallBag ? "; your thrall equipped it." : "."));
+                $"Stored {item.ItemName} in {bagName}.");
             BagWindow.RefreshAll();
             return true;
         }
@@ -871,9 +918,10 @@ namespace ErenshorSkills.Items
 
             if (thrallBag)
                 Necromancer.NecromancerPets.ApplyEscrowToActivePet();
+            string bagLabel = _bagNames.TryGetValue(bagId, out string savedBagName)
+                ? savedBagName : "Bag";
             ChatHelper.Send($"<color=#4CAF50>[{(thrallBag ? "Thrall Bag" : "Bag")}]</color> " +
-                $"Removed {expected.ItemName}{GetRarityTag(expected)}" +
-                (thrallBag ? "; your thrall unequipped it." : "."));
+                $"Removed {expected.ItemName}{GetRarityTag(expected)} from {bagLabel}.");
             if (consumeCorpseBag) BagWindow.CloseOne(bagId);
             else BagWindow.RefreshAll();
             return true;
@@ -990,10 +1038,11 @@ namespace ErenshorSkills.Items
 
             if (thrallBag)
                 Necromancer.NecromancerPets.ApplyEscrowToActivePet();
+            string bagLabel = _bagNames.TryGetValue(bagId, out string savedBagName)
+                ? savedBagName : "Bag";
             ChatHelper.Send(
                 $"<color=#4CAF50>[{(thrallBag ? "Thrall Bag" : "Bag")}]</color> " +
-                $"Removed {expected.ItemName}{GetRarityTag(expected)}" +
-                (thrallBag ? "; your thrall unequipped it." : "."));
+                $"Removed {expected.ItemName}{GetRarityTag(expected)} from {bagLabel}.");
             if (consumeCorpseBag) BagWindow.CloseOne(bagId);
             else BagWindow.RefreshAll();
             return true;
@@ -3044,7 +3093,8 @@ namespace ErenshorSkills.Items
             int slots = BagSystem.GetVisibleSlots(bagId, bagName);
             if (slots <= 0) return;
             int cols = Mathf.Min(slots,
-                BagSystem.IsCorpseBag(bagName) ? 8 : 4);
+                BagSystem.IsCorpseBag(bagName) ? 8 :
+                    (BagSystem.IsThrallBag(bagName) ? 6 : 4));
             int rows = Mathf.CeilToInt((float)slots / cols);
             float ox = 200 + _wins.Count * 30;
             float oy = _wins.Count * -25;
@@ -3120,6 +3170,14 @@ namespace ErenshorSkills.Items
             var target = FindBagSlot(screenPosition);
             if (target == null) return false;
             SetFocus(target.BagId, target.BagName);
+            if (target.IsEquipmentTarget &&
+                !target.AcceptsEquipmentItem(source?.MyItem))
+            {
+                ChatHelper.Send(
+                    $"<color=#EF5350>[Thrall]</color> That item does not fit the " +
+                    $"{target.EquipmentSlotType} slot.");
+                return true;
+            }
             BagSystem.TryStoreFromInventorySlot(
                 source, target.BagId, target.BagName);
             // Returning true means the pointer was released over a bag slot;
@@ -3167,6 +3225,9 @@ namespace ErenshorSkills.Items
         string _bagId, _bagName; int _cols, _rows;
         GameObject _root; RectTransform _panel, _slotsParent;
         List<GameObject> _slotGOs = new List<GameObject>();
+        List<GameObject> _sheetGOs = new List<GameObject>();
+        bool _isThrall;
+        float _backpackWidth;
         static readonly Color C_Bg = new Color(0.08f, 0.12f, 0.15f, 0.96f);    // Dark teal-blue
         static readonly Color C_Title = new Color(0.06f, 0.10f, 0.13f, 0.98f); // Darkest teal
         static readonly Color C_Slot = new Color(0.12f, 0.18f, 0.22f, 0.9f);   // Teal slot with item
@@ -3179,8 +3240,17 @@ namespace ErenshorSkills.Items
             int cols, int rows, float ox, float oy)
         {
             _bagId = bagId; _bagName = bagName; _cols = cols; _rows = rows;
-            float w = cols * SLOT + (cols + 1) * PAD;
-            float h = rows * SLOT + (rows + 1) * PAD + 28; // +28 for title
+            _isThrall = BagSystem.IsThrallBag(bagName);
+            _backpackWidth = _isThrall ? 0f :
+                cols * SLOT + (cols + 1) * PAD;
+            int equipmentSlots = _isThrall
+                ? BagSystem.GetThrallEquipmentSlots().Count : 0;
+            int equipmentRows = Mathf.CeilToInt(equipmentSlots / 3f);
+            float sheetHeight = _isThrall
+                ? Mathf.Max(190f, 38f + equipmentRows * 54f) : 0f;
+            float w = _isThrall ? 430f : _backpackWidth;
+            float h = _isThrall ? sheetHeight + 28f :
+                rows * SLOT + (rows + 1) * PAD + 28f;
 
             _root = new GameObject($"Bag_{bagId}");
             _root.transform.SetParent(parent, false);
@@ -3203,7 +3273,7 @@ namespace ErenshorSkills.Items
             string title = BagSystem.IsCorpseBag(bagName)
                 ? "Corpse Bag — take only"
                 : (BagSystem.IsThrallBag(bagName)
-                    ? "Thrall Bag — equipped" : bagName);
+                    ? "Bone Thrall — Character" : bagName);
             var tt = MkTxt(tRT, title, 13, Color.white, TextAnchor.MiddleCenter);
             tt.fontStyle = FontStyle.Bold;
             tGO.AddComponent<BagWindowDragger>().Target = _panel;
@@ -3260,8 +3330,16 @@ namespace ErenshorSkills.Items
         {
             foreach (var go in _slotGOs) if (go) UnityEngine.Object.Destroy(go);
             _slotGOs.Clear();
+            foreach (var go in _sheetGOs) if (go) UnityEngine.Object.Destroy(go);
+            _sheetGOs.Clear();
             int max = BagSystem.GetVisibleSlots(_bagId, _bagName);
             var contents = BagSystem.GetBagContents(_bagId);
+
+            if (_isThrall)
+            {
+                RefreshThrallSheet(contents);
+                return;
+            }
 
             for (int i = 0; i < max; i++)
             {
@@ -3352,6 +3430,222 @@ namespace ErenshorSkills.Items
             }
         }
 
+        private void RefreshThrallSheet(List<BagSystem.BagSlotData> contents)
+        {
+            if (_slotsParent == null) return;
+            var panel = new GameObject("ThrallCharacterSheet");
+            panel.transform.SetParent(_slotsParent, false);
+            var panelRect = panel.AddComponent<RectTransform>();
+            panelRect.anchorMin = panelRect.anchorMax = new Vector2(0, 1);
+            panelRect.pivot = new Vector2(0, 1);
+            int equipmentCount = BagSystem.GetThrallEquipmentSlots().Count;
+            int equipmentRows = Mathf.CeilToInt(equipmentCount / 3f);
+            float panelHeight = Mathf.Max(180f, 34f + equipmentRows * 54f);
+            panelRect.sizeDelta = new Vector2(414f, panelHeight);
+            panelRect.anchoredPosition = new Vector2(PAD, -PAD);
+            var panelImage = panel.AddComponent<Image>();
+            panelImage.color = new Color(0.06f, 0.10f, 0.13f, 0.94f);
+            var panelOutline = panel.AddComponent<Outline>();
+            panelOutline.effectColor = C_Border;
+            panelOutline.effectDistance = new Vector2(1, -1);
+            _sheetGOs.Add(panel);
+
+            var title = MkTxt(panelRect, "EQUIPMENT", 12,
+                new Color(0.82f, 0.70f, 0.48f), TextAnchor.MiddleCenter);
+            title.fontStyle = FontStyle.Bold;
+            SetTopRect(title.rectTransform, 194, 22, 2, 0);
+
+            var stats = GameData.PlayerControl?.Myself?.MyCharmedNPC;
+            var petStats = stats?.GetComponent<Stats>();
+            var petInventory = stats?.GetComponent<Inventory>();
+            var statRows = new List<string>();
+            if (stats != null && petStats != null && petInventory != null)
+            {
+                statRows.Add($"HP  {petStats.CurrentHP}/{petStats.CurrentMaxHP}   AC  {stats.HardSetAC}");
+                statRows.Add($"MP  {petStats.CurrentMana}/{ReadInteger(petStats, "CurrentMaxMana", "MaxMana", "CurrentMaxMP")}");
+                statRows.Add($"STR {petStats.BaseStr + petInventory.ItemStr}   END {petStats.BaseEnd + petInventory.ItemEnd}");
+                statRows.Add($"DEX {petStats.BaseDex + petInventory.ItemDex}   AGI {petStats.BaseAgi + petInventory.ItemAgi}");
+                statRows.Add($"INT {petStats.BaseInt + petInventory.ItemInt}   WIS {petStats.BaseWis + petInventory.ItemWis}");
+                statRows.Add($"CHA {petStats.BaseCha + petInventory.ItemCha}   RES {petStats.BaseRes + petInventory.ItemRes}");
+                statRows.Add($"MR {petStats.BaseMR + petInventory.ItemMR}   ER {petStats.BaseER + petInventory.ItemER}");
+                statRows.Add($"PR {petStats.BasePR + petInventory.ItemPR}   VR {petStats.BaseVR + petInventory.ItemVR}");
+                statRows.Add($"Damage  {stats.BaseAtkDmg} / {stats.OHAtkDmg}");
+            }
+            else statRows.Add("Summon a Bone Thrall to view stats.");
+
+            var statsTitle = MkTxt(panelRect, "THRALL STATS", 12,
+                new Color(0.82f, 0.70f, 0.48f), TextAnchor.MiddleCenter);
+            statsTitle.fontStyle = FontStyle.Bold;
+            SetTopRect(statsTitle.rectTransform, 204, 22, 204, 0);
+            float statY = 25f;
+            foreach (string row in statRows)
+            {
+                var text = MkTxt(panelRect, row, 10, Color.white,
+                    TextAnchor.MiddleLeft);
+                SetTopRect(text.rectTransform, 204, 16, 208, statY);
+                statY += 16f;
+            }
+
+            var used = new HashSet<int>();
+            List<ItemIcon> equipmentSlots = BagSystem.GetThrallEquipmentSlots();
+            int equipIndex = 0;
+            foreach (ItemIcon equipmentSlot in equipmentSlots)
+            {
+                if (equipmentSlot == null) continue;
+                int col = equipIndex % 3;
+                int row = equipIndex / 3;
+                float slotX = 5f + col * 64f;
+                float slotY = 26f + row * 54f;
+                Item.SlotType slotType = equipmentSlot.ThisSlotType;
+                int bagIndex = FindThrallEquipment(contents, slotType, used);
+                BagSystem.BagSlotData data = bagIndex >= 0
+                    ? contents[bagIndex] : null;
+                Item item = data != null ? ResolveThrallUiItem(data) : null;
+                CreateEquipmentCell(panelRect, slotX, slotY, slotType,
+                    bagIndex, data, item);
+                equipIndex++;
+            }
+        }
+
+        private int FindThrallEquipment(List<BagSystem.BagSlotData> contents,
+            Item.SlotType slotType, HashSet<int> used)
+        {
+            if (contents == null) return -1;
+            var wanted = slotType == Item.SlotType.Primary
+                ? Necromancer.NecromancerPetEquipment.Primary
+                : slotType == Item.SlotType.Secondary
+                    ? Necromancer.NecromancerPetEquipment.Secondary : null;
+            if (wanted != null)
+            {
+                for (int i = 0; i < contents.Count; i++)
+                {
+                    BagSystem.BagSlotData entry = contents[i];
+                    if (entry == null || used.Contains(i) ||
+                        !string.Equals(entry.ItemId, wanted.ItemId,
+                            StringComparison.OrdinalIgnoreCase) ||
+                        entry.Quantity != wanted.Quality) continue;
+                    used.Add(i);
+                    return i;
+                }
+            }
+            for (int i = 0; i < contents.Count; i++)
+            {
+                if (used.Contains(i)) continue;
+                Item item = ResolveThrallUiItem(contents[i]);
+                if (item == null || item.Stackable) continue;
+                Item.SlotType itemSlot = item.Aura != null
+                    ? Item.SlotType.Aura : item.RequiredSlot;
+                if (itemSlot == Item.SlotType.General) continue;
+                bool matches = itemSlot == slotType ||
+                    (itemSlot == Item.SlotType.PrimaryOrSecondary &&
+                     (slotType == Item.SlotType.Primary ||
+                      slotType == Item.SlotType.Secondary));
+                if (!matches) continue;
+                used.Add(i);
+                return i;
+            }
+            return -1;
+        }
+
+        private void CreateEquipmentCell(RectTransform parent, float x,
+            float y, Item.SlotType slotType, int bagIndex,
+            BagSystem.BagSlotData data, Item item)
+        {
+            var go = new GameObject("Equipment_" + slotType);
+            go.transform.SetParent(parent, false);
+            var rect = go.AddComponent<RectTransform>();
+            rect.anchorMin = rect.anchorMax = new Vector2(0, 1);
+            rect.pivot = new Vector2(0, 1);
+            rect.sizeDelta = new Vector2(60, 50);
+            rect.anchoredPosition = new Vector2(x, -y);
+            var bg = go.AddComponent<Image>();
+            bg.color = data != null ? C_Slot : C_Empty;
+            var outline = go.AddComponent<Outline>();
+            outline.effectColor = C_Border;
+            outline.effectDistance = new Vector2(1, -1);
+
+            var label = MkTxt(rect, ShortSlotName(slotType), 8,
+                new Color(0.80f, 0.84f, 0.86f), TextAnchor.UpperCenter);
+            SetTopRect(label.rectTransform, 60, 11, 0, 0);
+            if (item?.ItemIcon != null)
+            {
+                var iconGO = new GameObject("Icon");
+                iconGO.transform.SetParent(rect, false);
+                var iconRect = iconGO.AddComponent<RectTransform>();
+                iconRect.anchorMin = iconRect.anchorMax = new Vector2(0.5f, 0.5f);
+                iconRect.pivot = new Vector2(0.5f, 0.5f);
+                iconRect.sizeDelta = new Vector2(34, 34);
+                iconRect.anchoredPosition = new Vector2(0, -6);
+                var icon = iconGO.AddComponent<Image>();
+                icon.sprite = item.ItemIcon;
+                icon.preserveAspect = true;
+                icon.raycastTarget = false;
+            }
+            var interactionGO = new GameObject("Interaction");
+            interactionGO.transform.SetParent(rect, false);
+            var interactionRect = interactionGO.AddComponent<RectTransform>();
+            interactionRect.anchorMin = Vector2.zero;
+            interactionRect.anchorMax = Vector2.one;
+            interactionRect.offsetMin = interactionRect.offsetMax = Vector2.zero;
+            var hit = interactionGO.AddComponent<Image>();
+            hit.color = new Color(0, 0, 0, 0);
+            var interaction = interactionGO.AddComponent<BagSlotInteraction>();
+            interaction.Configure(_bagId, _bagName, bagIndex, data,
+                item, data?.Quantity ?? 1);
+            interaction.ConfigureEquipmentTarget(slotType);
+            _sheetGOs.Add(go);
+        }
+
+        private static Item ResolveThrallUiItem(BagSystem.BagSlotData data)
+        {
+            if (data == null) return null;
+            Item item = !string.IsNullOrEmpty(data.ItemId)
+                ? GameData.ItemDB?.GetItemByID(data.ItemId) : null;
+            if (item == null || item == GameData.PlayerInv?.Empty)
+                item = ItemFactory.ResolveItem(data.ItemName);
+            return item == GameData.PlayerInv?.Empty ? null : item;
+        }
+
+        private static string ShortSlotName(Item.SlotType slot)
+        {
+            string value = slot.ToString();
+            if (value == "PrimaryOrSecondary") return "Hand";
+            return value.Length > 8 ? value.Substring(0, 8) : value;
+        }
+
+        private static int ReadInteger(object instance, params string[] names)
+        {
+            if (instance == null) return 0;
+            const BindingFlags flags = BindingFlags.Instance |
+                BindingFlags.Public | BindingFlags.NonPublic;
+            foreach (string name in names)
+            {
+                FieldInfo field = instance.GetType().GetField(name, flags);
+                if (field != null)
+                {
+                    try { return Convert.ToInt32(field.GetValue(instance)); }
+                    catch { }
+                }
+                PropertyInfo property = instance.GetType().GetProperty(name, flags);
+                if (property != null)
+                {
+                    try { return Convert.ToInt32(property.GetValue(instance)); }
+                    catch { }
+                }
+            }
+            return 0;
+        }
+
+        private static void SetTopRect(RectTransform rect, float width,
+            float height, float x, float y)
+        {
+            rect.anchorMin = rect.anchorMax = new Vector2(0, 1);
+            rect.pivot = new Vector2(0, 1);
+            if (width <= 0) rect.anchorMax = new Vector2(1, 1);
+            rect.sizeDelta = new Vector2(width, height);
+            rect.anchoredPosition = new Vector2(x, -y);
+        }
+
         static Text MkTxt(RectTransform p, string t, int sz, Color c, TextAnchor a)
         {
             var go = new GameObject("T"); go.transform.SetParent(p, false);
@@ -3426,6 +3720,8 @@ namespace ErenshorSkills.Items
         int _tooltipQuantity;
         bool _dragging;
         bool _suppressClick;
+        public bool IsEquipmentTarget { get; private set; }
+        public Item.SlotType EquipmentSlotType { get; private set; }
         BagSystem.BagSlotData _expected;
         Item _item;
         GameObject _dragGhost;
@@ -3439,6 +3735,29 @@ namespace ErenshorSkills.Items
             _expected = expected;
             _item = item;
             _tooltipQuantity = Mathf.Max(1, tooltipQuantity);
+        }
+
+        internal void ConfigureEquipmentTarget(Item.SlotType slotType)
+        {
+            IsEquipmentTarget = true;
+            EquipmentSlotType = slotType;
+        }
+
+        internal bool AcceptsEquipmentItem(Item item)
+        {
+            if (!IsEquipmentTarget || item == null || item.Stackable) return false;
+            Item.SlotType itemSlot = item.Aura != null
+                ? Item.SlotType.Aura : item.RequiredSlot;
+            if (itemSlot == Item.SlotType.General) return false;
+            if (EquipmentSlotType == Item.SlotType.Primary)
+                return !item.Shield &&
+                    (itemSlot == Item.SlotType.Primary ||
+                     itemSlot == Item.SlotType.PrimaryOrSecondary);
+            if (EquipmentSlotType == Item.SlotType.Secondary)
+                return item.Shield ||
+                    itemSlot == Item.SlotType.Secondary ||
+                    itemSlot == Item.SlotType.PrimaryOrSecondary;
+            return itemSlot == EquipmentSlotType;
         }
 
         public void OnPointerDown(PointerEventData eventData)
@@ -3460,6 +3779,15 @@ namespace ErenshorSkills.Items
                 (GameData.MouseSlot != null && GameData.MouseSlot.dragging);
             if (cursorBusy)
             {
+                if (IsEquipmentTarget &&
+                    !AcceptsEquipmentItem(GameData.ItemOnCursor?.MyItem ??
+                        GameData.MouseSlot?.MyItem))
+                {
+                    ChatHelper.Send(
+                        $"<color=#EF5350>[Thrall]</color> That item does not fit the " +
+                        $"{EquipmentSlotType} slot.");
+                    return;
+                }
                 BagSystem.TryStoreCursorItem(BagId, BagName);
                 return;
             }

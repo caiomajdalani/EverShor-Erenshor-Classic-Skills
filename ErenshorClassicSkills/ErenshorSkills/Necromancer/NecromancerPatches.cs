@@ -210,8 +210,8 @@ namespace ErenshorSkills.Necromancer
             {
                 // Erenshor's non-SimPlayer melee path ignores the
                 // PerformMeleeHit baseDamage argument and rolls DamageRange
-                // instead. Project the already capped pet/weapon damage into
-                // that live range so equipped weapons affect actual hits.
+                // instead. Project the pet's gear/attribute-scaled hit damage
+                // into that live range so equipped items affect actual hits.
                 int damage = Mathf.Max(1, isOffhand
                     ? __instance.OHAtkDmg : __instance.BaseAtkDmg);
                 __instance.DamageRange = new Vector2(damage, damage);
@@ -229,6 +229,12 @@ namespace ErenshorSkills.Necromancer
                     __instance.GetChar()?.MyStats, true);
             }
             return false;
+        }
+
+        private static void Postfix(NPC __instance, bool isOffhand)
+        {
+            NecromancerPets.TryTriggerEquippedWeaponProc(__instance,
+                isOffhand);
         }
     }
 
@@ -269,13 +275,6 @@ namespace ErenshorSkills.Necromancer
 
     internal static class NecromancerCharacterCreation
     {
-        private const string ButtonName = "CS_NecromancerClassButton";
-        private static readonly HashSet<string> NativeClassLabels =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "Arcanist", "Windblade", "Druid", "Paladin",
-                "Stormcaller", "Reaver"
-            };
         private static readonly MethodInfo CheckUsedNames = AccessTools.Method(
             typeof(CharSelectManager), "CheckUsedNames");
 
@@ -285,116 +284,8 @@ namespace ErenshorSkills.Necromancer
                 return;
             NecromancerCatalog.TryInitialize();
             NecromancerCatalog.EnsureClass();
-            if (NecromancerCatalog.NecromancerClass == null ||
-                manager.CharCreate == null) return;
-
-            Button sourceButton = manager.CharCreate
-                .GetComponentsInChildren<Button>(true)
-                .FirstOrDefault(candidate => string.Equals(
-                    GetButtonLabel(candidate), "Reaver",
-                    StringComparison.OrdinalIgnoreCase));
-            if (sourceButton == null) return;
-            Transform container = sourceButton.transform.parent;
-            Transform existing = container.Find(ButtonName);
-            if (existing != null) return;
-
-            GameObject clone = UnityEngine.Object.Instantiate(
-                sourceButton.gameObject, container, false);
-            clone.name = ButtonName;
-            RectTransform cloneRect = clone.GetComponent<RectTransform>();
-            Button button = clone.GetComponent<Button>();
-            button.onClick = new Button.ButtonClickedEvent();
-            button.onClick.AddListener(() => SelectNecromancer(manager));
-            TextMeshProUGUI text = clone.GetComponentInChildren<TextMeshProUGUI>(true);
-            if (text != null)
-            {
-                text.text = NecromancerCatalog.ClassName;
-                text.enableWordWrapping = false;
-                text.enableAutoSizing = true;
-                text.fontSizeMin = 10f;
-                text.fontSizeMax = text.fontSize;
-            }
-            PositionClassLayout(manager, container,
-                cloneRect);
-            clone.SetActive(true);
-            SkillsPlugin.Log.LogInfo(
-                "Necromancer class option added to character creation.");
-        }
-
-        private static string GetButtonLabel(Button button)
-        {
-            return button?.GetComponentInChildren<TextMeshProUGUI>(true)?.text?
-                .Trim() ?? string.Empty;
-        }
-
-        private static void PositionClassLayout(CharSelectManager manager,
-            Transform container, RectTransform clone)
-        {
-            if (clone == null) return;
-            List<RectTransform> native = container
-                .GetComponentsInChildren<Button>(true)
-                .Where(button => button.transform.parent == container &&
-                    NativeClassLabels.Contains(GetButtonLabel(button)))
-                .Select(button => button.GetComponent<RectTransform>())
-                .Where(rect => rect != null && rect != clone)
-                .ToList();
-            if (native.Count < NativeClassLabels.Count)
-            {
-                SkillsPlugin.Log.LogWarning(
-                    "Necromancer class button layout could not identify all native class buttons.");
-                return;
-            }
-
-            List<float> rowCenters = new List<float>();
-            foreach (float y in native.Select(rect => rect.anchoredPosition.y)
-                .OrderByDescending(value => value))
-            {
-                if (rowCenters.All(existing => Mathf.Abs(existing - y) > 4f))
-                    rowCenters.Add(y);
-            }
-            float rowSpacing = rowCenters.Count > 1
-                ? rowCenters.Zip(rowCenters.Skip(1), (upper, lower) => upper - lower)
-                    .Average()
-                : clone.rect.height + 2f;
-            rowSpacing = Mathf.Max(clone.rect.height + 1f, rowSpacing);
-            float bottomY = native.Min(rect => rect.anchoredPosition.y);
-            List<RectTransform> bottomRow = native
-                .Where(rect => Mathf.Abs(rect.anchoredPosition.y - bottomY) <= 4f)
-                .ToList();
-            float centerX = bottomRow.Count > 0
-                ? bottomRow.Average(rect => rect.anchoredPosition.x)
-                : 0f;
-            clone.anchoredPosition = new Vector2(centerX, bottomY - rowSpacing);
-
-            RectTransform details = container as RectTransform;
-            if (details != null)
-                details.sizeDelta += new Vector2(0f, rowSpacing * 1.75f);
-
-            RectTransform personalize = manager.Personalizer != null
-                ? manager.Personalizer.GetComponent<RectTransform>()
-                : null;
-            if (personalize != null && personalize.parent == container)
-            {
-                personalize.anchoredPosition += Vector2.down * rowSpacing;
-                foreach (RectTransform child in personalize
-                    .Cast<Transform>()
-                    .Select(item => item as RectTransform)
-                    .Where(item => item != null &&
-                        (item.name.StartsWith("InputField", StringComparison.Ordinal) ||
-                         item.name.StartsWith("EditName", StringComparison.Ordinal))))
-                    child.anchoredPosition += Vector2.up * rowSpacing;
-            }
-
-            foreach (RectTransform child in container
-                .Cast<Transform>()
-                .Select(item => item as RectTransform)
-                .Where(item => item != null && item != personalize &&
-                    item != clone && item.anchoredPosition.y < 0f))
-                child.anchoredPosition += Vector2.down * rowSpacing;
-
-            SkillsPlugin.Log.LogInfo(
-                $"Necromancer class layout: button={clone.anchoredPosition}, " +
-                $"rowSpacing={rowSpacing:F1}, panelHeight={details?.rect.height:F1}.");
+            if (NecromancerCatalog.NecromancerClass == null) return;
+            ErenshorSkills.Patches.EverShorCharacterCreationPager.Install(manager);
         }
 
         internal static void SelectNecromancer(CharSelectManager manager)

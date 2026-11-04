@@ -1,20 +1,22 @@
 using System;
-using BepInEx;
-using BepInEx.Configuration;
-using BepInEx.Logging;
+using Lunaris;
+using Lunaris.Config;
 using HarmonyLib;
 using UnityEngine;
 
 namespace ErenshorSkills
 {
-    [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
-    public class SkillsPlugin : BaseUnityPlugin
+    [LunarisPluginAttribute(PluginName, PluginVersion, "KrautchanPro", "Adds classic skills, tradeskills, SimCraft, and the Monk and Necromancer classes to Erenshor.")]
+    [LunarisPermissionAttribute(LunarisPermission.Harmony)]
+    public class SkillsPlugin : LunarisPlugin
     {
         public const string PluginGuid = "com.erenshor.classicskills";
-        public const string PluginName = "Erenshor Classic Skills";
-        public const string PluginVersion = "1.8.4";
+        public const string PluginName = "EverShor - Classic Skills, Classes and Features";
+        public const string PluginVersion = "1.9.0";
 
-        internal static ManualLogSource Log;
+        internal static ModLogger Log;
+        private IConfigHandle<ClassicSkillsSettings> _settingsHandle;
+        internal static ClassicSkillsSettings Settings { get; private set; }
         internal static SkillsPlugin Instance;
         private Harmony _harmony;
         private bool _recoverNativeItemsAfterLiveEnable;
@@ -80,10 +82,22 @@ namespace ErenshorSkills
         internal static int AppliedPatchClassCount { get; private set; }
         internal static int FailedPatchClassCount { get; private set; }
 
+        [LunarisCommandAttribute("skills", "Show your Classic Skills levels and progress.")]
+        public static void CommandSkills(string arguments)
+        {
+            Patches.Patch_ChatCommands.ShowSkillOverviewFromLunaris();
+        }
+
+        [LunarisCommandAttribute("extrasettings", "Open the Classic Skills chat and combat log settings.")]
+        public static void CommandExtraSettings(string arguments)
+        {
+            UI.LogDisplaySettingsUI.Open();
+        }
+
         private void Awake()
         {
             Instance = this;
-            Log = Logger;
+            Log = new ModLogger(Logging);
 
             bool pathsValid = RuntimePaths.Validate(out string pathDetail);
             if (pathsValid)
@@ -154,9 +168,8 @@ namespace ErenshorSkills
                 Log.LogWarning(
                     "TEST MODE IS ENABLED. Disable Testing.EnableTestMode after controlled verification.");
 
-            // BepInEx normally creates us before the character scene loads, but
-            // Lunaris can enable or hot-reload a legacy plugin while the player
-            // is already in the world.  In that case there is no future
+            // Native Lunaris can enable or hot-reload a plugin while the player
+            // is already in the world. In that case there is no future
             // sceneLoaded event to bootstrap the current character, so run the
             // same guarded scene initialization against the active scene now.
             // The real sceneLoaded callback remains subscribed for later zone
@@ -187,6 +200,7 @@ namespace ErenshorSkills
                 typeof(Patches.Patch_UseCustomConsumable),
                 typeof(Patches.Patch_SwimSpeed),
                 typeof(Patches.Patch_BuffDuration),
+                typeof(Patches.Patch_StatsTickEffectsCrashGuard),
                 // Combat XP + Attack Sync Fix (merged)
                 typeof(Patches.Patch_PerformAttacks),
                 typeof(Patches.Patch_MeleeXP),
@@ -214,6 +228,7 @@ namespace ErenshorSkills
                 typeof(Patches.Patch_CustomClassPlayAlternate),
                 typeof(Patches.Patch_CustomClassNativeSave),
                 typeof(Patches.Patch_CustomClassRawSave),
+                typeof(Patches.Patch_FateOfTheFallenCharacterCreationPager),
                 typeof(Necromancer.Patch_NecromancerStartingItems),
                 typeof(Necromancer.Patch_NecromancerPlayerClassIcon),
                 typeof(Necromancer.Patch_NecromancerRaidClassIcon),
@@ -363,125 +378,77 @@ namespace ErenshorSkills
 
         private void BindConfig()
         {
-            // ── Global ──────────────────────────────────────────────────
-            CfgSkillWindowKey = Config.Bind("Global", "SkillWindowKey", KeyCode.F8,
-                "Key to toggle the Classic Skills window.");
-            CfgShowChatMessages = Config.Bind("Global", "ShowChatMessages", true,
-                "Show skill-up and usage messages in chat.");
-            CfgShowUtilityActionButtons = Config.Bind("Interface",
-                "ShowUtilityActionButtons", true,
-                "Show draggable Forage, Bind Wound, and Begging icons with hotkeys and cooldown overlays.");
-            Features.LogDisplayOptions.BindConfig(Config);
-            // Lunaris's legacy ConfigFile wrapper keys entries by key name only,
-            // without the BepInEx section. Two generic "Enabled" entries would
-            // therefore alias one another and make Necromancer follow the
-            // corpse-run default. Keep legacy BepInEx names for existing configs,
-            // but use unambiguous keys in Lunaris's plugin-options store.
-            string corpseRunEnabledKey = RuntimePaths.IsLunaris
-                ? "CorpseRunEnabled" : "Enabled";
-            string necromancerEnabledKey = RuntimePaths.IsLunaris
-                ? "NecromancerEnabled" : "Enabled";
-            string monkEnabledKey = RuntimePaths.IsLunaris
-                ? "MonkEnabled" : "Enabled";
-            CfgEnableCorpseRun = Config.Bind("Corpse Run", corpseRunEnabledKey, false,
-                "Opt in to leaving inventory, equipped gear, cosmetics, aura, charm, and gold on a recoverable corpse when you die.");
-            CfgEnableNecromancer = Config.Bind("Necromancer", necromancerEnabledKey, true,
-                "Add the playable Necromancer class, its spells, armed skeletal pets, and spell merchants.");
-            CfgEnableMonk = Config.Bind("Monk", monkEnabledKey, true,
-                "Add the playable Monk class, its hand-to-hand techniques, auras, class gear, and martial trainers.");
-            CfgGlobalMaxLevel = Config.Bind("Global", "MaxSkillLevel", 180,
-                "Maximum level for all skills (1-180).");
+            // Register the complete settings model through Lunaris's native API.
+            // Property names remain stable within this native configuration model.
+            _settingsHandle = Config.Register<ClassicSkillsSettings>();
+            Settings = _settingsHandle.Get();
+            if (Settings == null)
+                throw new InvalidOperationException("Lunaris returned a null ClassicSkillsSettings instance.");
 
-            // ── Skill Toggles ───────────────────────────────────────────
-            CfgEnableFishing = Config.Bind("Skill Toggles", "EnableFishing", true,
-                "Enable the Fishing skill.");
-            CfgEnableForaging = Config.Bind("Skill Toggles", "EnableForaging", true,
-                "Enable the Foraging skill (find items while exploring).");
-            CfgEnableSwimming = Config.Bind("Skill Toggles", "EnableSwimming", true,
-                "Enable the Swimming skill (move faster in water).");
-            // Sense Heading removed
-            CfgEnableBindWound = Config.Bind("Skill Toggles", "EnableBindWound", true,
-                "Enable the Bind Wound skill (bandage yourself out of combat).");
-            CfgEnableMeditate = Config.Bind("Skill Toggles", "EnableMeditate", true,
-                "Enable the Meditate skill (faster mana regen while sitting).");
-            // Safe Fall removed
-            CfgEnableFoodTolerance = Config.Bind("Skill Toggles", "EnableFoodTolerance", true,
-                "Enable the Food Tolerance skill (food/drink buff duration).");
-            CfgEnableBegging = Config.Bind("Skill Toggles", "EnableBegging", true,
-                "Enable the Begging skill (beg NPCs for copper).");
-            CfgEnableCombatSkills = Config.Bind("Skill Toggles", "EnableCombatSkills", true,
-                "Enable combat weapon skills (1H Slash, 1H Blunt, Piercing, etc.).");
-            CfgCraftFromBags = Config.Bind("Tradeskills", "CraftFromBags", false,
-                "Allow tradeskill crafting to pull materials from bags in your inventory.");
-            CfgCraftFromBank = Config.Bind("Tradeskills", "CraftFromBank", false,
-                "Allow tradeskill crafting to pull materials from your bank.");
+            CfgSkillWindowKey = CreateConfigEntry(nameof(Settings.SkillWindowKey), () => Settings.SkillWindowKey, v => Settings.SkillWindowKey = v);
+            CfgShowChatMessages = CreateConfigEntry(nameof(Settings.ShowChatMessages), () => Settings.ShowChatMessages, v => Settings.ShowChatMessages = v);
+            CfgShowUtilityActionButtons = CreateConfigEntry(nameof(Settings.ShowUtilityActionButtons), () => Settings.ShowUtilityActionButtons, v => Settings.ShowUtilityActionButtons = v);
+            CfgEnableCorpseRun = CreateConfigEntry(nameof(Settings.CorpseRunEnabled), () => Settings.CorpseRunEnabled, v => Settings.CorpseRunEnabled = v);
+            CfgEnableNecromancer = CreateConfigEntry(nameof(Settings.NecromancerEnabled), () => Settings.NecromancerEnabled, v => Settings.NecromancerEnabled = v);
+            CfgEnableMonk = CreateConfigEntry(nameof(Settings.MonkEnabled), () => Settings.MonkEnabled, v => Settings.MonkEnabled = v);
+            CfgGlobalMaxLevel = CreateConfigEntry(nameof(Settings.MaxSkillLevel), () => Settings.MaxSkillLevel, v => Settings.MaxSkillLevel = v);
 
-            CfgEnableMagicSkills = Config.Bind("Skill Toggles", "EnableMagicSkills", true,
-                "Enable magic skills (Evocation, Abjuration, Alteration, Conjuration).");
-            CfgEnableSimPlayerSkills = Config.Bind("Skill Toggles", "EnableSimPlayerSkills", true,
-                "Give sim players virtual combat/magic skill bonuses based on their level and class.");
-            CfgEnableSimCraft = Config.Bind("Skill Toggles", "EnableSimCraft", true,
-                "Allow players to whisper sim players to request crafting. Sim will craft, negotiate price, walk to you, and trade.");
-            CfgSimCraftFailCooldown = Config.Bind("Skill Toggles", "SimCraftFailCooldownSeconds", 60,
-                "Cooldown in seconds before a sim player can attempt the same recipe again after a total failure.");
-            CfgSimChatIntervalMin = Config.Bind("Skill Toggles", "SimChatIntervalMinSeconds", 180,
-                "Minimum seconds between ambient sim tradeskill/skill chat messages.");
-            CfgSimChatIntervalMax = Config.Bind("Skill Toggles", "SimChatIntervalMaxSeconds", 480,
-                "Maximum seconds between ambient sim tradeskill/skill chat messages.");
-            CfgEnableSimWTB = Config.Bind("Skill Toggles", "EnableSimWTB", true,
-                "Allow players to whisper sims to sell items they've shouted WTB for. Sim comes to you and you trade via native window.");
-            CfgEnableSimWTS = Config.Bind("Skill Toggles", "EnableSimWTS", true,
-                "Sims shout real WTS listings for items they can craft. Players can whisper to buy pre-crafted items.");
-            CfgSimWTBExpiry = Config.Bind("Skill Toggles", "SimWTBExpirySeconds", 300,
-                "How long a WTB or WTS listing stays active before expiring (default 5 minutes).");
-            CfgCatchUpCombatMagic = Config.Bind("Skill Toggles", "CatchUpCombatMagicSkills", false,
-                "On first load, set combat and magic skill levels based on character level and class. Helps pre-existing characters catch up.");
-            CfgCatchUpUtilityTrade = Config.Bind("Skill Toggles", "CatchUpUtilityTradeskills", false,
-                "On first load, set utility and tradeskill levels based on character level. Helps pre-existing characters catch up.");
-            CfgForceCatchUp = Config.Bind("Skill Toggles", "ForceCatchUpOnNextLoad", false,
-                "Set to true to force catch-up skill levels on your next login, even if you already have a save file. Resets to false automatically after applying.");
+            CfgEnableFishing = CreateConfigEntry(nameof(Settings.EnableFishing), () => Settings.EnableFishing, v => Settings.EnableFishing = v);
+            CfgEnableForaging = CreateConfigEntry(nameof(Settings.EnableForaging), () => Settings.EnableForaging, v => Settings.EnableForaging = v);
+            CfgEnableSwimming = CreateConfigEntry(nameof(Settings.EnableSwimming), () => Settings.EnableSwimming, v => Settings.EnableSwimming = v);
+            CfgEnableBindWound = CreateConfigEntry(nameof(Settings.EnableBindWound), () => Settings.EnableBindWound, v => Settings.EnableBindWound = v);
+            CfgEnableMeditate = CreateConfigEntry(nameof(Settings.EnableMeditate), () => Settings.EnableMeditate, v => Settings.EnableMeditate = v);
+            CfgEnableFoodTolerance = CreateConfigEntry(nameof(Settings.EnableFoodTolerance), () => Settings.EnableFoodTolerance, v => Settings.EnableFoodTolerance = v);
+            CfgEnableBegging = CreateConfigEntry(nameof(Settings.EnableBegging), () => Settings.EnableBegging, v => Settings.EnableBegging = v);
+            CfgEnableCombatSkills = CreateConfigEntry(nameof(Settings.EnableCombatSkills), () => Settings.EnableCombatSkills, v => Settings.EnableCombatSkills = v);
+            CfgCraftFromBags = CreateConfigEntry(nameof(Settings.CraftFromBags), () => Settings.CraftFromBags, v => Settings.CraftFromBags = v);
+            CfgCraftFromBank = CreateConfigEntry(nameof(Settings.CraftFromBank), () => Settings.CraftFromBank, v => Settings.CraftFromBank = v);
+            CfgEnableMagicSkills = CreateConfigEntry(nameof(Settings.EnableMagicSkills), () => Settings.EnableMagicSkills, v => Settings.EnableMagicSkills = v);
+            CfgEnableSimPlayerSkills = CreateConfigEntry(nameof(Settings.EnableSimPlayerSkills), () => Settings.EnableSimPlayerSkills, v => Settings.EnableSimPlayerSkills = v);
+            CfgEnableSimCraft = CreateConfigEntry(nameof(Settings.EnableSimCraft), () => Settings.EnableSimCraft, v => Settings.EnableSimCraft = v);
+            CfgSimCraftFailCooldown = CreateConfigEntry(nameof(Settings.SimCraftFailCooldownSeconds), () => Settings.SimCraftFailCooldownSeconds, v => Settings.SimCraftFailCooldownSeconds = v);
+            CfgSimChatIntervalMin = CreateConfigEntry(nameof(Settings.SimChatIntervalMinSeconds), () => Settings.SimChatIntervalMinSeconds, v => Settings.SimChatIntervalMinSeconds = v);
+            CfgSimChatIntervalMax = CreateConfigEntry(nameof(Settings.SimChatIntervalMaxSeconds), () => Settings.SimChatIntervalMaxSeconds, v => Settings.SimChatIntervalMaxSeconds = v);
+            CfgEnableSimWTB = CreateConfigEntry(nameof(Settings.EnableSimWTB), () => Settings.EnableSimWTB, v => Settings.EnableSimWTB = v);
+            CfgEnableSimWTS = CreateConfigEntry(nameof(Settings.EnableSimWTS), () => Settings.EnableSimWTS, v => Settings.EnableSimWTS = v);
+            CfgSimWTBExpiry = CreateConfigEntry(nameof(Settings.SimWTBExpirySeconds), () => Settings.SimWTBExpirySeconds, v => Settings.SimWTBExpirySeconds = v);
+            CfgCatchUpCombatMagic = CreateConfigEntry(nameof(Settings.CatchUpCombatMagicSkills), () => Settings.CatchUpCombatMagicSkills, v => Settings.CatchUpCombatMagicSkills = v);
+            CfgCatchUpUtilityTrade = CreateConfigEntry(nameof(Settings.CatchUpUtilityTradeskills), () => Settings.CatchUpUtilityTradeskills, v => Settings.CatchUpUtilityTradeskills = v);
+            CfgForceCatchUp = CreateConfigEntry(nameof(Settings.ForceCatchUpOnNextLoad), () => Settings.ForceCatchUpOnNextLoad, v => Settings.ForceCatchUpOnNextLoad = v);
 
-            // ── Attack Sync Fix (merged) ────────────────────────────────
-            Patches.AttackSyncConfig.Init(Config);
+            CfgForageKey = CreateConfigEntry(nameof(Settings.ForageKey), () => Settings.ForageKey, v => Settings.ForageKey = v);
+            CfgBindWoundKey = CreateConfigEntry(nameof(Settings.BindWoundKey), () => Settings.BindWoundKey, v => Settings.BindWoundKey = v);
+            CfgBegKey = CreateConfigEntry(nameof(Settings.BegKey), () => Settings.BegKey, v => Settings.BegKey = v);
+            CfgMeditateKey = CreateConfigEntry(nameof(Settings.MeditateKey), () => Settings.MeditateKey, v => Settings.MeditateKey = v);
+            CfgBindWoundBaseHealPercent = CreateConfigEntry(nameof(Settings.BindWoundBaseHealPercent), () => Settings.BindWoundBaseHealPercent, v => Settings.BindWoundBaseHealPercent = v);
+            CfgMeditateBaseMana = CreateConfigEntry(nameof(Settings.MeditateBaseMana), () => Settings.MeditateBaseMana, v => Settings.MeditateBaseMana = v);
+            CfgCombatSkillDamagePerLevel = CreateConfigEntry(nameof(Settings.CombatSkillDamagePerLevel), () => Settings.CombatSkillDamagePerLevel, v => Settings.CombatSkillDamagePerLevel = v);
+            CfgEvocationDamagePerLevel = CreateConfigEntry(nameof(Settings.EvocationDamagePerLevel), () => Settings.EvocationDamagePerLevel, v => Settings.EvocationDamagePerLevel = v);
+            CfgAbjurationDurationPerLevel = CreateConfigEntry(nameof(Settings.AbjurationDurationPerLevel), () => Settings.AbjurationDurationPerLevel, v => Settings.AbjurationDurationPerLevel = v);
+            CfgAlterationHealPerLevel = CreateConfigEntry(nameof(Settings.AlterationHealPerLevel), () => Settings.AlterationHealPerLevel, v => Settings.AlterationHealPerLevel = v);
+            CfgConjurationDamagePerLevel = CreateConfigEntry(nameof(Settings.ConjurationDamagePerLevel), () => Settings.ConjurationDamagePerLevel, v => Settings.ConjurationDamagePerLevel = v);
+            CfgTestCooldowns = CreateConfigEntry(nameof(Settings.TestCooldowns), () => Settings.TestCooldowns, v => Settings.TestCooldowns = v);
+            CfgEnableTestMode = CreateConfigEntry(nameof(Settings.EnableTestMode), () => Settings.EnableTestMode, v => Settings.EnableTestMode = v);
+            CfgEnableDebugCommands = CreateConfigEntry(nameof(Settings.EnableDebugCommands), () => Settings.EnableDebugCommands, v => Settings.EnableDebugCommands = v);
 
-            // ── Keybinds ────────────────────────────────────────────────
-            CfgForageKey = Config.Bind("Keybinds", "ForageKey", KeyCode.F9,
-                "Key to attempt foraging.");
-            CfgBindWoundKey = Config.Bind("Keybinds", "BindWoundKey", KeyCode.F10,
-                "Key to bind wounds (bandage self).");
-            // Sense Heading removed
-            CfgBegKey = Config.Bind("Keybinds", "BegKey", KeyCode.Semicolon,
-                "Key to beg from targeted NPC.");
-            CfgMeditateKey = Config.Bind("Keybinds", "MeditateKey", KeyCode.M,
-                "Legacy setting retained for config compatibility. Meditation now activates automatically while sitting out of combat.");
+            Patches.AttackSyncConfig.Init(Settings);
+            Features.LogDisplayOptions.BindConfig(Settings);
+            Config.Save();
+        }
 
-            // ── Skill Tuning ────────────────────────────────────────────
-            CfgBindWoundBaseHealPercent = Config.Bind("Skill Tuning", "BindWoundBaseHealPercent", 3f,
-                "Base percentage of max HP healed per Bind Wound use. Scales +0.15% per level (30% at skill 180).");
-            CfgMeditateBaseMana = Config.Bind("Skill Tuning", "MeditateBaseMana", 2f,
-                "Base extra mana per tick while meditating. Scales with skill level.");
-            // Safe Fall removed
-            // Safe Fall removed
-            CfgCombatSkillDamagePerLevel = Config.Bind("Skill Tuning", "CombatSkillDamagePerLevel", 0.085f,
-                "Percent bonus damage per combat skill level. At 0.085, level 180 = +15.3% damage.");
+        internal static ConfigEntry<T> CreateConfigEntry<T>(string key, Func<T> getter, Action<T> setter)
+        {
+            return new ConfigEntry<T>(key, getter, value =>
+            {
+                setter(value);
+                SaveNativeConfig();
+            });
+        }
 
-            // ── Magic Skill Tuning ──────────────────────────────────
-            CfgEvocationDamagePerLevel = Config.Bind("Skill Tuning", "EvocationDamagePerLevel", 0.0008f,
-                "Bonus spell damage per Evocation level. At 0.0008, level 180 = +14.4%.");
-            CfgAbjurationDurationPerLevel = Config.Bind("Skill Tuning", "AbjurationDurationPerLevel", 0.003f,
-                "Bonus buff duration per Abjuration level. At 0.003, level 180 = +54%.");
-            CfgAlterationHealPerLevel = Config.Bind("Skill Tuning", "AlterationHealPerLevel", 0.0008f,
-                "Bonus heal amount per Alteration level. At 0.0008, level 180 = +14.4%.");
-            CfgConjurationDamagePerLevel = Config.Bind("Skill Tuning", "ConjurationDamagePerLevel", 0.0008f,
-                "Bonus Conjuration DoT and summoned-pet damage per level. At 0.0008, level 180 = +14.4%.");
-
-            // ── Testing ─────────────────────────────────────────────────
-            CfgTestCooldowns = Config.Bind("Testing", "TestCooldowns", false,
-                "Set all utility skill cooldowns to 1 second for testing.");
-            CfgEnableTestMode = Config.Bind("Testing", "EnableTestMode", false,
-                "Enable the controlled /cstest smoke-test and item-grant commands. Leave disabled during normal play.");
-            CfgEnableDebugCommands = Config.Bind("Testing", "EnableDebugCommands", false,
-                "Enable developer-only chat commands that grant items/points or dump data.");
+        internal static void SaveNativeConfig()
+        {
+            try { Instance?.Config?.Save(); }
+            catch (Exception ex) { Log?.LogWarning("Could not save Lunaris settings: " + ex.Message); }
         }
 
         private void ValidateConfig()
@@ -620,17 +587,26 @@ namespace ErenshorSkills
 
         private void OnDestroy()
         {
+            // Lunaris unloads plugins in a collectible context. Stop every
+            // activity and detach every external callback before clearing the
+            // static state that would otherwise keep this assembly reachable.
             try { StopAllCoroutines(); } catch { }
+            try { Patches.EverShorCharacterCreationPager.Shutdown(); } catch { }
+            Patches.Patch_StatsTickEffectsCrashGuard.Reset();
             try { AddonInputState.Reset(); } catch { }
             try { Skills.SimPlayerTradeskills.OnSceneChange(); } catch { }
-            // Save on plugin destroy (game quit)
+
+            // Persist game data and native Lunaris options before releasing refs.
             try
             {
                 Items.ItemFactory.SaveCustomInventory();
                 SkillsSaveManager.Save();
                 Necromancer.NecromancerPetEquipment.Save();
             }
-            catch { }
+            catch (Exception ex) { Log?.LogWarning("Could not save character data during unload: " + ex.Message); }
+            try { Config?.Save(); }
+            catch (Exception ex) { Log?.LogWarning("Could not save Lunaris settings during unload: " + ex.Message); }
+
             try { UI.TradeskillWindow.Shutdown(); } catch { }
             try { UI.SimCraftTradeUI.Shutdown(); } catch { }
             try { UI.LogDisplaySettingsUI.Shutdown(); } catch { }
@@ -640,13 +616,44 @@ namespace ErenshorSkills
             try { Monk.MonkCatalog.ResetRuntimeReferences(); } catch { }
             try { Items.BagWindow.Shutdown(); } catch { }
             try { Stations.CraftingStations.Shutdown(); } catch { }
-            _harmony?.UnpatchSelf();
-            UnityEngine.SceneManagement.SceneManager.sceneLoaded -= OnSceneLoaded;
-            if (ReferenceEquals(Instance, this)) Instance = null;
+
+            try { UnityEngine.SceneManagement.SceneManager.sceneLoaded -= OnSceneLoaded; } catch { }
+            try { _harmony?.UnpatchSelf(); } catch (Exception ex) { Log?.LogWarning("Could not fully remove Harmony patches during unload: " + ex.Message); }
+            _harmony = null;
+
+            try { Patches.AttackSyncConfig.Reset(); } catch { }
+            try { Features.LogDisplayOptions.Reset(); } catch { }
+            ResetConfigEntryReferences();
+            _settingsHandle = null;
+            Settings = null;
+
+            RuntimePaths.Reset();
+            if (ReferenceEquals(Instance, this))
+            {
+                Instance = null;
+                Log = null;
+            }
+        }
+
+        private static void ResetConfigEntryReferences()
+        {
+            // The old feature code reads these small adapters. Clear all of
+            // them in one place so no stale delegate retains the settings model.
+            const System.Reflection.BindingFlags flags =
+                System.Reflection.BindingFlags.Static |
+                System.Reflection.BindingFlags.NonPublic;
+            foreach (System.Reflection.FieldInfo field in typeof(SkillsPlugin).GetFields(flags))
+            {
+                Type fieldType = field.FieldType;
+                if (fieldType.IsGenericType &&
+                    fieldType.GetGenericTypeDefinition() == typeof(ConfigEntry<>))
+                    field.SetValue(null, null);
+            }
         }
 
         private void OnSceneLoaded(UnityEngine.SceneManagement.Scene scene, UnityEngine.SceneManagement.LoadSceneMode mode)
         {
+            Patches.Patch_StatsTickEffectsCrashGuard.Reset();
             // Scene-bound SimCraft and delayed-load coroutines must not carry stale
             // Character/Transform references into the next zone or character.
             StopAllCoroutines();

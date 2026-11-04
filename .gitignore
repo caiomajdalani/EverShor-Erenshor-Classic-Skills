@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+**/lib/
+artifacts/
+.vs/
+*.user
+*.suo
+*.dll
+*.pdb
