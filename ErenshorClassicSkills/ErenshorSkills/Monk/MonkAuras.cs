@@ -115,7 +115,7 @@ namespace ErenshorSkills.Monk
             var spell = ScriptableObject.CreateInstance<Spell>();
             spell.name = "CS MONK AURA - " + definition.ItemName;
             spell.Id = BuildSpellId(definition.Key);
-            spell.UsedBy = new List<Class> { MonkCatalog.MonkClass };
+            spell.UsedBy = GetAllowedClasses(definition);
             spell.Type = Spell.SpellType.Beneficial;
             spell.Line = AuraLine;
             spell.RequiredLevel = template.RequiredLevel;
@@ -183,7 +183,7 @@ namespace ErenshorSkills.Monk
                 Mathf.Max(5, spell.RequiredLevel * spell.RequiredLevel * 10));
             item.ItemIcon = LoadIcon("Monk Aura Item " + definition.Key);
             item.RequiredSlot = Item.SlotType.Aura;
-            item.Classes = new List<Class> { MonkCatalog.MonkClass };
+            item.Classes = new List<Class>(spell.UsedBy);
             item.Aura = spell;
             item.Lore = definition.Lore + "\n\n" + spell.SpellDesc +
                 "\nRequired level: " + spell.RequiredLevel + ".";
@@ -286,11 +286,20 @@ namespace ErenshorSkills.Monk
                 if (ReferenceEquals(spell.SpellIcon, item.ItemIcon))
                     errors.Add("reused effect/item icon " +
                         definition.ItemName);
+                bool sharesWithReaver = string.Equals(definition.Key,
+                    "grandmasters_presence", StringComparison.OrdinalIgnoreCase) &&
+                    GameData.ClassDB?.Reaver != null;
+                int expectedClassCount = sharesWithReaver ? 2 : 1;
                 if (spell.Line != AuraLine || spell.UsedBy == null ||
-                    spell.UsedBy.Count != 1 ||
+                    spell.UsedBy.Count != expectedClassCount ||
                     !spell.UsedBy.Contains(MonkCatalog.MonkClass) ||
-                    item.Classes == null || item.Classes.Count != 1 ||
+                    (sharesWithReaver &&
+                     !spell.UsedBy.Contains(GameData.ClassDB.Reaver)) ||
+                    item.Classes == null ||
+                    item.Classes.Count != expectedClassCount ||
                     !item.Classes.Contains(MonkCatalog.MonkClass) ||
+                    (sharesWithReaver &&
+                     !item.Classes.Contains(GameData.ClassDB.Reaver)) ||
                     !ReferenceEquals(item.Aura, spell))
                     errors.Add("class/item contract " +
                         definition.ItemName);
@@ -301,7 +310,7 @@ namespace ErenshorSkills.Monk
             if (!ValidateNativeBudgetMirror(out string budgetDetail))
                 errors.Add(budgetDetail);
             detail = errors.Count == 0
-                ? "five unique aura gems/effects with Monk-only restrictions, deterministic IDs, and " + budgetDetail
+                ? "five unique aura gems/effects; Grandmaster's Presence is usable by Monk and Reaver, other gems remain Monk-only; deterministic IDs; " + budgetDetail
                 : string.Join("; ", errors);
             return errors.Count == 0;
         }
@@ -401,6 +410,20 @@ namespace ErenshorSkills.Monk
                   $"{savedId ?? "<null>"}; equipped=" +
                   $"{equipped?.Id ?? "<null>"}";
             return valid;
+        }
+
+        private static List<Class> GetAllowedClasses(Definition definition)
+        {
+            var classes = new List<Class> { MonkCatalog.MonkClass };
+            if (definition != null && string.Equals(definition.Key,
+                    "grandmasters_presence",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                Class reaver = GameData.ClassDB?.Reaver;
+                if (reaver != null && !classes.Contains(reaver))
+                    classes.Add(reaver);
+            }
+            return classes;
         }
 
         private static void ClearCustomAuraStatuses(Stats stats)

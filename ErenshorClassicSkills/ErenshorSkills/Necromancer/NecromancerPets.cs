@@ -16,6 +16,19 @@ namespace ErenshorSkills.Necromancer
         internal int BasePetArmor;
         internal int BasePetDamage;
         internal int BasePetOffhandDamage;
+        internal int BasePetMana;
+        internal readonly List<Skill> ManagedAttackSkills =
+            new List<Skill>();
+        internal readonly List<Skill> ManagedKnownSkills =
+            new List<Skill>();
+        internal readonly List<Spell> ManagedAttackSpells =
+            new List<Spell>();
+        internal readonly List<Spell> ManagedBuffSpells =
+            new List<Spell>();
+        internal readonly List<Spell> ManagedTauntSpells =
+            new List<Spell>();
+        internal readonly List<Spell> ManagedKnownSpells =
+            new List<Spell>();
         internal int BaseInventoryHp;
         internal int BaseInventoryAc;
         internal int BaseInventoryMana;
@@ -32,6 +45,9 @@ namespace ErenshorSkills.Necromancer
         internal int BaseInventoryPr;
         internal int BaseInventoryVr;
         internal float NextTauntAt;
+        internal float NextAreaTauntAt;
+        internal readonly Collider[] AreaTauntHits = new Collider[64];
+        internal readonly HashSet<NPC> AreaTauntTargets = new HashSet<NPC>();
         internal int SuccessfulTaunts;
         internal Avatar NativePetAvatar;
         internal RuntimeAnimatorController NativePetController;
@@ -90,6 +106,7 @@ namespace ErenshorSkills.Necromancer
         private void LateUpdate()
         {
             SynchronizeMovementSpeed();
+            NecromancerPets.TryAreaGraveChallenge(this);
         }
 
         private void OnDestroy()
@@ -338,8 +355,8 @@ namespace ErenshorSkills.Necromancer
         // height is 1.5, melee reach 4). Clear separation from the caster while
         // still landing just inside their own melee reach.
         private const float SummonStandOffDistance = 12f * 0.3048f;
-        internal const float GraveChallengeCooldownSeconds = 6f;
-        private const int MinimumTauntHateLead = 25;
+        internal const float GraveChallengeCooldownSeconds = ThrallCombatPolicy.DirectTauntCooldown;
+        private const int MinimumTauntHateLead = 75;
         private static readonly MethodInfo NpcCheckForBowMethod =
             typeof(NPC).GetMethod("CheckForBow",
                 BindingFlags.Instance | BindingFlags.NonPublic);
@@ -354,9 +371,6 @@ namespace ErenshorSkills.Necromancer
         private static readonly int[] TierDexterity = { 0, 28, 160, 430, 480, 360 };
         private static readonly int[] TierAgility = { 0, 6, 28, 20, 140, 140 };
         private static readonly int[] TierResist = { 0, 0, 0, 0, 55, 80 };
-        private static readonly int[] TierWeaponCap = { 0, 3, 5, 8, 11, 15 };
-        private static readonly int[] TierOffhandCap = { 0, 2, 4, 6, 8, 10 };
-        private static readonly int[] TierShieldCap = { 0, 12, 30, 55, 85, 120 };
         internal static int BowAttackAttemptCount { get; private set; }
         internal static int BowProjectileLaunchCount { get; private set; }
         internal static int BowProjectileDeliveryCount { get; private set; }
@@ -504,7 +518,8 @@ namespace ErenshorSkills.Necromancer
             stats.Level = petLevel;
             stats.BaseHP = baseHp;
             stats.BaseAC = 5;
-            stats.BaseMana = 0;
+            marker.BasePetMana = Mathf.Max(500, ownerLevel * 125);
+            stats.BaseMana = marker.BasePetMana;
             stats.BaseStr = TierStrength[marker.Tier];
             stats.BaseEnd = TierEndurance[marker.Tier];
             stats.BaseDex = TierDexterity[marker.Tier];
@@ -602,9 +617,9 @@ namespace ErenshorSkills.Necromancer
                     $"DMG {damage}/{druidDamage[tier]}");
             }
             detail = errors.Count == 0
-                ? "Bone Thralls use the durable taunting-companion envelope " +
-                  $"(Grave Challenge {GraveChallengeCooldownSeconds:F0}s) " +
-                  "while staying at or below comparable Druid pet damage: " +
+                ? "Bone Thralls use the tank companion profile " +
+                  $"(Grave Challenge {GraveChallengeCooldownSeconds:F1}s) " +
+                  "with weapon, attribute, skill, and spell scaling: " +
                   string.Join(", ", rows)
                 : string.Join("; ", errors);
             return errors.Count == 0;
@@ -615,6 +630,52 @@ namespace ErenshorSkills.Necromancer
         /// peels an enemy from the Necromancer who owns the thrall; it will not
         /// steal aggro from another player or SimPlayer tank in a group.
         /// </summary>
+        internal static void TryAreaGraveChallenge(NecromancerPetMarker marker)
+        {
+            if (marker == null || marker.Owner == null ||
+                Time.time < marker.NextAreaTauntAt) return;
+            NPC pet = marker.GetComponent<NPC>();
+            Character attacker = pet?.GetChar();
+            if (attacker == null || !attacker.Alive ||
+                pet.CurrentAggroTarget == null ||
+                !pet.CurrentAggroTarget.Alive) return;
+            marker.NextAreaTauntAt = Time.time + ThrallCombatPolicy.AreaTauntCooldown;
+            var seen = marker.AreaTauntTargets;
+            seen.Clear();
+            int hitCount = Physics.OverlapSphereNonAlloc(pet.transform.position,
+                ThrallCombatPolicy.AreaTauntRadius, marker.AreaTauntHits);
+            // A full buffer may be truncated. Fall back only in dense fights
+            // so an optimization cannot silently drop an eligible enemy.
+            Collider[] hits = hitCount == marker.AreaTauntHits.Length
+                ? Physics.OverlapSphere(pet.transform.position,
+                    ThrallCombatPolicy.AreaTauntRadius) : marker.AreaTauntHits;
+            if (!ReferenceEquals(hits, marker.AreaTauntHits)) hitCount = hits.Length;
+            for (int i = 0; i < hitCount; i++)
+            {
+                Collider hit = hits[i];
+                if (hit == null) continue;
+                NPC enemy = hit.GetComponentInParent<NPC>();
+                if (enemy == null || enemy == pet || !seen.Add(enemy) ||
+                    enemy.NeverAggro) continue;
+                Character target = enemy.GetChar();
+                if (target == null || !target.Alive ||
+                    target.MyStats == null || target.MyStats.Charmed) continue;
+                // Only enemies already fighting this owner or Thrall qualify.
+                // Proximity alone must never provoke neutral townsfolk.
+                bool engaged = enemy.CurrentAggroTarget == attacker ||
+                    enemy.CurrentAggroTarget == marker.Owner ||
+                    enemy.AggroTable?.Any(slot => slot != null &&
+                        slot.Hate > 0 && (slot.Player == attacker ||
+                        slot.Player == marker.Owner)) == true;
+                if (ThrallCombatPolicy.CanAreaTaunt(target.Alive,
+                    target.MyStats.Charmed, enemy.NeverAggro, engaged,
+                    (enemy.transform.position - pet.transform.position).sqrMagnitude))
+                    TryGraveChallenge(target, attacker, true, out _);
+            }
+            seen.Clear();
+            Array.Clear(marker.AreaTauntHits, 0, marker.AreaTauntHits.Length);
+        }
+
         internal static bool TryGraveChallenge(Character target,
             Character attacker, bool bypassCooldown, out string detail)
         {
@@ -658,7 +719,7 @@ namespace ErenshorSkills.Necromancer
                 .Select(slot => slot.Hate)
                 .DefaultIfEmpty(0).Max();
             int hateLead = Mathf.Max(MinimumTauntHateLead,
-                (attacker.MyStats?.Level ?? 1) * 3);
+                (attacker.MyStats?.Level ?? 1) * 6);
             AggroSlot petSlot = enemy.GetAggroSlot(attacker);
             int previousHate = petSlot?.Hate ?? 0;
             int desiredHate = Mathf.Max(previousHate, highestHate + hateLead);
@@ -829,6 +890,44 @@ namespace ErenshorSkills.Necromancer
                 targetHealthBefore - currentHealth);
         }
 
+        internal static void TryTriggerEquippedWeaponProc(NPC pet,
+            bool offhand)
+        {
+            if (pet?.GetComponent<NecromancerPetMarker>() == null) return;
+            Item weapon = offhand
+                ? NecromancerPetEquipment.Resolve(
+                    NecromancerPetEquipment.Secondary)
+                : NecromancerPetEquipment.Resolve(
+                    NecromancerPetEquipment.Primary);
+            Character target = pet.CurrentAggroTarget;
+            Stats stats = pet.GetComponent<Stats>();
+            if (target == null || !target.Alive || stats == null) return;
+
+            var procItems = new HashSet<Item>();
+            if (weapon?.WeaponProcOnHit != null) procItems.Add(weapon);
+            foreach (var entry in
+                NecromancerPetEquipment.GetAdditionalThrallGear())
+            {
+                Item armor = entry.item;
+                if (armor != null && armor.WeaponProcOnHit != null &&
+                    armor.RequiredSlot != Item.SlotType.Primary &&
+                    armor.RequiredSlot != Item.SlotType.Secondary &&
+                    armor.RequiredSlot != Item.SlotType.PrimaryOrSecondary)
+                    procItems.Add(armor);
+            }
+
+            foreach (Item item in procItems)
+            {
+                try { stats.CheckProc(item, target); }
+                catch (Exception ex)
+                {
+                    SkillsPlugin.Log?.LogWarning(
+                        "Bone Thrall equipment proc failed: " +
+                        ex.GetBaseException().Message);
+                }
+            }
+        }
+
         /// <summary>
         /// Applies a visible, fully statted QA weapon without mutating the
         /// character-scoped pet escrow. The progression DPS harness uses this
@@ -867,23 +966,31 @@ namespace ErenshorSkills.Necromancer
 
             float healthRatio = stats.CurrentMaxHP > 0
                 ? Mathf.Clamp01((float)stats.CurrentHP / stats.CurrentMaxHP) : 1f;
+            int maxMana = stats.GetCurrentMaxMana();
+            float manaRatio = maxMana > 0
+                ? Mathf.Clamp01((float)stats.CurrentMana / maxMana) : 1f;
             RestoreInventoryBaseline(marker, inv);
             stats.BaseHP = marker.BasePetHp;
+            stats.BaseMana = marker.BasePetMana;
             pet.HardSetAC = marker.BasePetArmor;
             pet.BaseAtkDmg = marker.BasePetDamage;
             pet.OHAtkDmg = marker.BasePetOffhandDamage;
-            ApplyItemStats(inv, primary, quality, marker.Tier);
+            ApplyItemStats(inv, primary, quality);
             pet.HardSetAC += Mathf.Max(0,
                 inv.ItemAC - marker.BaseInventoryAc);
-            int weaponContribution = Mathf.Clamp(primary.CalcDmg(
-                primary.WeaponDmg, quality), 0, TierWeaponCap[marker.Tier]);
+            int weaponContribution = GetWeaponDpsContribution(primary,
+                quality, stats.BaseMHAtkDelay);
             pet.BaseAtkDmg += weaponContribution;
             stats.BaseHP = marker.BasePetHp + Mathf.Max(0,
                 inv.ItemHP - marker.BaseInventoryHp);
             RebuildEquipmentVisuals(pet, primary, null);
             stats.CalcStats();
+            pet.BaseAtkDmg += GetAttributeDamageBonus(primary, stats);
             stats.CurrentHP = Mathf.Clamp(Mathf.RoundToInt(
                 stats.CurrentMaxHP * healthRatio), 1, stats.CurrentMaxHP);
+            maxMana = stats.GetCurrentMaxMana();
+            stats.CurrentMana = Mathf.Clamp(Mathf.RoundToInt(
+                maxMana * manaRatio), 0, maxMana);
             NormalizePetLighting(pet);
 
             string expectedName = "CS_PetGear_" +
@@ -897,7 +1004,7 @@ namespace ErenshorSkills.Necromancer
                     renderer != null && renderer.enabled &&
                     renderer.gameObject.activeInHierarchy);
             detail = $"{primary.ItemName} L{primary.ItemLevel} q{quality}, " +
-                $"weapon {primary.WeaponDmg} capped to +{weaponContribution}, " +
+                $"weapon DPS contribution +{weaponContribution}, " +
                 $"pet damage {marker.BasePetDamage}->{pet.BaseAtkDmg}, " +
                 $"model={primary.EquipmentToActivate ?? "none"}, rendered={rendered}";
             return rendered;
@@ -913,8 +1020,12 @@ namespace ErenshorSkills.Necromancer
 
             float healthRatio = stats.CurrentMaxHP > 0
                 ? Mathf.Clamp01((float)stats.CurrentHP / stats.CurrentMaxHP) : 1f;
+            int maxMana = stats.GetCurrentMaxMana();
+            float manaRatio = maxMana > 0
+                ? Mathf.Clamp01((float)stats.CurrentMana / maxMana) : 1f;
             RestoreInventoryBaseline(marker, inv);
             stats.BaseHP = marker.BasePetHp;
+            stats.BaseMana = marker.BasePetMana;
             pet.HardSetAC = marker.BasePetArmor;
             pet.BaseAtkDmg = marker.BasePetDamage;
             pet.OHAtkDmg = marker.BasePetOffhandDamage;
@@ -926,21 +1037,21 @@ namespace ErenshorSkills.Necromancer
             if (primary != null)
             {
                 int quality = NecromancerPetEquipment.Primary.Quality;
-                ApplyItemStats(inv, primary, quality, marker.Tier);
+                ApplyItemStats(inv, primary, quality);
                 if (primary.WeaponDmg > 0)
-                    pet.BaseAtkDmg += Mathf.Clamp(primary.CalcDmg(
-                        primary.WeaponDmg, quality), 0,
-                        TierWeaponCap[marker.Tier]);
+                    pet.BaseAtkDmg += GetWeaponDpsContribution(primary,
+                        quality, stats.BaseMHAtkDelay);
             }
             if (secondary != null)
             {
                 int quality = NecromancerPetEquipment.Secondary.Quality;
-                ApplyItemStats(inv, secondary, quality, marker.Tier);
+                ApplyItemStats(inv, secondary, quality);
                 if (!secondary.Shield && secondary.WeaponDmg > 0)
-                    pet.OHAtkDmg = Mathf.Clamp(secondary.CalcDmg(
-                        secondary.WeaponDmg, quality), 0,
-                        TierOffhandCap[marker.Tier]);
+                    pet.OHAtkDmg = GetWeaponDpsContribution(secondary,
+                        quality, stats.BaseOHAtkDelay);
             }
+            foreach (var extra in NecromancerPetEquipment.GetAdditionalThrallGear())
+                ApplyItemStats(inv, extra.item, extra.quality);
 
             // NPC CalcStats uses HardSetAC instead of Inventory.ItemAC. Add
             // the aggregate projected AC from both equipped items exactly
@@ -950,11 +1061,206 @@ namespace ErenshorSkills.Necromancer
 
             stats.BaseHP = marker.BasePetHp + Mathf.Max(0,
                 inv.ItemHP - marker.BaseInventoryHp);
+            ConfigurePetCombatKit(pet, marker.Owner);
             RebuildEquipmentVisuals(pet, primary, secondary);
             stats.CalcStats();
+            pet.BaseAtkDmg += GetAttributeDamageBonus(primary, stats);
+            if (secondary != null && !secondary.Shield &&
+                secondary.WeaponDmg > 0)
+                pet.OHAtkDmg += Mathf.Max(0,
+                    (stats.BaseStr + (inv.ItemStr)) / 8);
             stats.CurrentHP = Mathf.Clamp(Mathf.RoundToInt(
                 stats.CurrentMaxHP * healthRatio), 1, stats.CurrentMaxHP);
+            maxMana = stats.GetCurrentMaxMana();
+            stats.CurrentMana = Mathf.Clamp(Mathf.RoundToInt(
+                maxMana * manaRatio), 0, maxMana);
             NormalizePetLighting(pet);
+        }
+
+        private static int GetAttributeDamageBonus(Item weapon, Stats stats)
+        {
+            if (weapon == null || stats == null) return 0;
+            bool ranged = weapon.IsBow ||
+                weapon.ThisWeaponType == Item.WeaponType.TwoHandBow;
+            int offensiveAttribute = ranged
+                ? stats.BaseDex + (stats.MyInv?.ItemDex ?? 0)
+                : stats.BaseStr + (stats.MyInv?.ItemStr ?? 0);
+            // Native NPC swings use a flat DamageRange and otherwise ignore
+            // the Thrall's accumulated gear attributes. Convert a fifth of
+            // the relevant live attribute into each main-hand hit so strong
+            // equipment translates into visible real damage.
+            return Mathf.Max(0, offensiveAttribute / 5);
+        }
+
+        private static void ConfigurePetCombatKit(NPC pet, Character owner)
+        {
+            if (pet == null || owner == null) return;
+            NecromancerPetMarker marker =
+                pet.GetComponent<NecromancerPetMarker>();
+            if (marker == null) return;
+
+            pet.MyAttackSkills ??= new List<Skill>();
+            pet.MyAttackSpells ??= new List<Spell>();
+            pet.MyBuffSpells ??= new List<Spell>();
+            pet.MyTauntSpell ??= new List<Spell>();
+            UseSkill petSkills = pet.GetComponent<UseSkill>();
+            CastSpell petSpells = pet.GetComponent<CastSpell>();
+
+            foreach (Skill skill in marker.ManagedAttackSkills)
+                pet.MyAttackSkills.Remove(skill);
+            foreach (Skill skill in marker.ManagedKnownSkills)
+                petSkills?.KnownSkills?.Remove(skill);
+            foreach (Spell spell in marker.ManagedAttackSpells)
+                pet.MyAttackSpells.Remove(spell);
+            foreach (Spell spell in marker.ManagedBuffSpells)
+                pet.MyBuffSpells.Remove(spell);
+            foreach (Spell spell in marker.ManagedTauntSpells)
+                pet.MyTauntSpell.Remove(spell);
+            foreach (Spell spell in marker.ManagedKnownSpells)
+                petSpells?.KnownSpells?.Remove(spell);
+            marker.ManagedAttackSkills.Clear();
+            marker.ManagedKnownSkills.Clear();
+            marker.ManagedAttackSpells.Clear();
+            marker.ManagedBuffSpells.Clear();
+            marker.ManagedTauntSpells.Clear();
+            marker.ManagedKnownSpells.Clear();
+
+            if (petSkills != null && petSkills.KnownSkills == null)
+                petSkills.KnownSkills = new List<Skill>();
+            if (petSpells != null && petSpells.KnownSpells == null)
+                petSpells.KnownSpells = new List<Spell>();
+
+            // Never mirror abilities learned by the player onto the Thrall.
+            // The native pet kit remains intact; gear-granted abilities are
+            // added below from the Thrall's own equipped items.
+            foreach (Skill learned in owner.MySkills?.KnownSkills ??
+                new List<Skill>())
+            {
+                pet.MyAttackSkills.Remove(learned);
+                petSkills?.KnownSkills?.Remove(learned);
+            }
+            foreach (Spell learned in owner.MySpells?.KnownSpells ??
+                new List<Spell>())
+            {
+                pet.MyAttackSpells.Remove(learned);
+                pet.MyBuffSpells.Remove(learned);
+                pet.MyTauntSpell.Remove(learned);
+                petSpells?.KnownSpells?.Remove(learned);
+            }
+
+            int level = Mathf.Max(1, owner.MyStats?.Level ?? 1);
+
+            var gear = new List<Item>();
+            Item primary = NecromancerPetEquipment.Resolve(
+                NecromancerPetEquipment.Primary);
+            Item secondary = NecromancerPetEquipment.Resolve(
+                NecromancerPetEquipment.Secondary);
+            if (primary != null) gear.Add(primary);
+            if (secondary != null) gear.Add(secondary);
+            gear.AddRange(NecromancerPetEquipment.GetAdditionalThrallGear()
+                .Select(entry => entry.item).Where(item => item != null));
+            foreach (Item item in gear.Distinct())
+            {
+                AddPetAttackSkill(pet, petSkills, marker,
+                    item.ItemSkillUse, level);
+                AddPetAttackSkill(pet, petSkills, marker,
+                    item.TeachSkill, level);
+            }
+
+            var availableSpells = new HashSet<Spell>();
+            var innateSpells = NecromancerThrallAbilities.GetKit(marker.Tier);
+            foreach (Spell spell in innateSpells) availableSpells.Add(spell);
+            foreach (Item item in gear)
+                if (item?.TeachSpell != null &&
+                    item.TeachSpell.RequiredLevel <= level)
+                    availableSpells.Add(item.TeachSpell);
+
+            foreach (Spell spell in availableSpells)
+            {
+                NecromancerCatalog.TryGetDefinition(spell,
+                        out NecromancerSpellDefinition definition);
+
+                if (spell.TauntSpell)
+                {
+                    AddManagedSpell(pet.MyTauntSpell,
+                        marker.ManagedTauntSpells, spell);
+                    AddManagedSpell(petSpells?.KnownSpells,
+                        marker.ManagedKnownSpells, spell);
+                }
+                else if (spell.Type == Spell.SpellType.Damage ||
+                    spell.Type == Spell.SpellType.StatusEffect ||
+                    spell.Type == Spell.SpellType.PBAE)
+                {
+                    // Skip fear/root and other control effects: the Thrall
+                    // should keep enemies in melee range for its group.
+                    if (spell.FearTarget || spell.RootTarget ||
+                        (spell.CrowdControlSpell &&
+                         !innateSpells.Contains(spell))) continue;
+                    AddManagedSpell(pet.MyAttackSpells,
+                        marker.ManagedAttackSpells, spell);
+                    AddManagedSpell(petSpells?.KnownSpells,
+                        marker.ManagedKnownSpells, spell);
+                }
+                else if (spell.Type == Spell.SpellType.Beneficial &&
+                    (definition == null ||
+                     !definition.GrantInvisibility))
+                {
+                    AddManagedSpell(pet.MyBuffSpells,
+                        marker.ManagedBuffSpells, spell);
+                    AddManagedSpell(petSpells?.KnownSpells,
+                        marker.ManagedKnownSpells, spell);
+                }
+            }
+        }
+
+        private static void AddPetAttackSkill(NPC pet, UseSkill petSkills,
+            NecromancerPetMarker marker, Skill skill, int level)
+        {
+            if (skill == null ||
+                (skill.TypeOfSkill != Skill.SkillType.Attack &&
+                 skill.TypeOfSkill != Skill.SkillType.Ranged))
+                return;
+            bool levelAllowed = skill.ArcanistRequiredLevel <= 0 ||
+                skill.ArcanistRequiredLevel <= level;
+            if (!levelAllowed) return;
+            if (!pet.MyAttackSkills.Contains(skill))
+            {
+                pet.MyAttackSkills.Add(skill);
+                marker.ManagedAttackSkills.Add(skill);
+            }
+            if (petSkills?.KnownSkills != null &&
+                !petSkills.KnownSkills.Contains(skill))
+            {
+                petSkills.KnownSkills.Add(skill);
+                marker.ManagedKnownSkills.Add(skill);
+            }
+        }
+
+        private static void AddManagedSpell(List<Spell> destination,
+            List<Spell> managed, Spell spell)
+        {
+            if (destination == null || spell == null ||
+                destination.Contains(spell)) return;
+            destination.Add(spell);
+            if (!managed.Contains(spell)) managed.Add(spell);
+        }
+
+        private static int GetWeaponDpsContribution(Item weapon, int quality,
+            float petAttackDelayHundredths)
+        {
+            if (weapon == null || weapon.WeaponDmg <= 0 ||
+                weapon.WeaponDly <= 0f) return 0;
+            float weaponDamage = Mathf.Max(0,
+                weapon.CalcDmg(weapon.WeaponDmg, quality));
+            float weaponDelay = Mathf.Max(0.1f, weapon.WeaponDly);
+            float petSwingSeconds = Mathf.Max(0.1f,
+                petAttackDelayHundredths / 100f);
+            // Normalize item DPS to the thrall's native swing interval. This
+            // lets faster/slower weapons affect real damage per attack without
+            // changing the pet's tier-based attack cadence.
+            int perSwingDamage = Mathf.RoundToInt(
+                weaponDamage / weaponDelay * petSwingSeconds);
+            return Mathf.Max(0, perSwingDamage);
         }
 
         private static void NormalizePetLighting(NPC pet)
@@ -1000,45 +1306,23 @@ namespace ErenshorSkills.Necromancer
             inv.ItemVR = marker.BaseInventoryVr;
         }
 
-        private static void ApplyItemStats(Inventory inv, Item item, int quality,
-            int tier)
+        private static void ApplyItemStats(Inventory inv, Item item, int quality)
         {
-            tier = Mathf.Clamp(tier, 1, 5);
-            int hpCap = 50 * tier * tier;
-            int acCap = item.Shield
-                ? TierShieldCap[tier] : 10 * tier * tier;
-            int statCap = 5 * tier;
-            int resistCap = 5 * tier;
-            inv.ItemHP += Mathf.Clamp(item.CalcACHPMC(item.HP, quality),
-                -hpCap, hpCap);
-            inv.ItemAC += Mathf.Clamp(item.CalcAC(item.AC, quality),
-                -acCap, acCap);
-            inv.ItemMana += Mathf.Clamp(item.CalcACHPMC(item.Mana, quality),
-                -hpCap, hpCap);
-            inv.ItemStr += Mathf.Clamp(item.CalcStat(item.Str, quality),
-                -statCap, statCap);
-            inv.ItemEnd += Mathf.Clamp(item.CalcStat(item.End, quality),
-                -statCap, statCap);
-            inv.ItemDex += Mathf.Clamp(item.CalcStat(item.Dex, quality),
-                -statCap, statCap);
-            inv.ItemAgi += Mathf.Clamp(item.CalcStat(item.Agi, quality),
-                -statCap, statCap);
-            inv.ItemInt += Mathf.Clamp(item.CalcStat(item.Int, quality),
-                -statCap, statCap);
-            inv.ItemWis += Mathf.Clamp(item.CalcStat(item.Wis, quality),
-                -statCap, statCap);
-            inv.ItemCha += Mathf.Clamp(item.CalcStat(item.Cha, quality),
-                -statCap, statCap);
-            inv.ItemRes += Mathf.Clamp(item.CalcRes(item.Res, quality),
-                -resistCap, resistCap);
-            inv.ItemMR += Mathf.Clamp(item.CalcResists(item.MR, quality),
-                -resistCap, resistCap);
-            inv.ItemER += Mathf.Clamp(item.CalcResists(item.ER, quality),
-                -resistCap, resistCap);
-            inv.ItemPR += Mathf.Clamp(item.CalcResists(item.PR, quality),
-                -resistCap, resistCap);
-            inv.ItemVR += Mathf.Clamp(item.CalcResists(item.VR, quality),
-                -resistCap, resistCap);
+            inv.ItemHP += item.CalcACHPMC(item.HP, quality);
+            inv.ItemAC += item.CalcAC(item.AC, quality);
+            inv.ItemMana += item.CalcACHPMC(item.Mana, quality);
+            inv.ItemStr += item.CalcStat(item.Str, quality);
+            inv.ItemEnd += item.CalcStat(item.End, quality);
+            inv.ItemDex += item.CalcStat(item.Dex, quality);
+            inv.ItemAgi += item.CalcStat(item.Agi, quality);
+            inv.ItemInt += item.CalcStat(item.Int, quality);
+            inv.ItemWis += item.CalcStat(item.Wis, quality);
+            inv.ItemCha += item.CalcStat(item.Cha, quality);
+            inv.ItemRes += item.CalcRes(item.Res, quality);
+            inv.ItemMR += item.CalcResists(item.MR, quality);
+            inv.ItemER += item.CalcResists(item.ER, quality);
+            inv.ItemPR += item.CalcResists(item.PR, quality);
+            inv.ItemVR += item.CalcResists(item.VR, quality);
         }
 
         internal static void ApplyPersistentStatCurve(Stats stats)
@@ -1088,11 +1372,192 @@ namespace ErenshorSkills.Necromancer
                     GetEquipmentHand(pet,
                         !UsesLeftHand(secondary, false)),
                     secondary, false);
+            // Armor models are skinned to the player avatar. Rebinding those
+            // meshes to the Thrall rig can produce invalid bind-pose geometry
+            // (large stretched polygons). Keep armor stats/equipment active,
+            // but do not clone these renderers until a compatible visual rig
+            // can be used safely. Weapon visuals use their own attachment path.
             // The summoned-skeleton prefab ships with its own spectral sword.
             // A thrall's armament comes from the Thrall Bag and nowhere else,
             // so keep the prefab weapon hidden in every case: bag weapon means
             // that weapon, empty bag means bare hands.
             SetNativeRightHandWeaponVisible(pet, false);
+        }
+
+        private static void AttachEquippedArmorVisuals(Transform visualRoot,
+            NPC pet)
+        {
+            if (visualRoot == null || pet == null) return;
+            NecromancerPetMarker marker =
+                pet.GetComponent<NecromancerPetMarker>();
+            Animator playerAnimator =
+                GameData.PlayerControl?.Myself?.GetMyAnim();
+            Transform playerRoot = playerAnimator?.transform.Find("Root");
+            Transform rig = marker?.PlayerAvatarRig;
+            ModularParts sourceParts = GameData.PlayerModularParent?.Male;
+            if (marker == null || rig == null || sourceParts == null) return;
+
+            foreach (var equipped in NecromancerPetEquipment
+                .GetAdditionalThrallGear())
+            {
+                Item item = equipped.item;
+                if (item == null || item.WeaponDmg > 0 || item.Shield ||
+                    string.IsNullOrWhiteSpace(item.EquipmentToActivate) ||
+                    string.Equals(item.EquipmentToActivate, "DEFAULT",
+                        StringComparison.OrdinalIgnoreCase)) continue;
+
+                Transform[] matches = sourceParts.GetComponentsInChildren<Transform>(true)
+                    .Where(value => value != null && value != sourceParts.transform &&
+                        string.Equals(value.name, item.EquipmentToActivate,
+                            StringComparison.Ordinal))
+                    .ToArray();
+                if (matches.Length == 0)
+                {
+                    SkillsPlugin.Log?.LogWarning(
+                        $"Thrall equipment visual '{item.EquipmentToActivate}' " +
+                        $"for {item.ItemName} was not found in the player modular parts.");
+                    continue;
+                }
+
+                foreach (Transform source in matches)
+                {
+                    Transform target = FindMappedPetAncestor(source.parent,
+                        playerRoot, rig);
+                    if (target == null)
+                        target = GetPetEquipmentBone(pet,
+                            item.RequiredSlot, source.parent?.name);
+                    if (target == null)
+                    {
+                        SkillsPlugin.Log?.LogWarning(
+                            $"Thrall equipment visual '{item.EquipmentToActivate}' " +
+                            $"has no compatible bone for {item.RequiredSlot}.");
+                        continue;
+                    }
+                    AttachArmorVisual(visualRoot, pet, playerAnimator,
+                        playerRoot, rig, target, source, item);
+                }
+            }
+        }
+
+        private static Transform FindMappedPetAncestor(Transform source,
+            Transform playerRoot, Transform petRig)
+        {
+            if (source == null || playerRoot == null || petRig == null) return null;
+            Transform current = source;
+            while (current != null && IsTransformUnder(current, playerRoot))
+            {
+                string path = GetRelativeRigPath(current, playerRoot);
+                Transform mapped = path == null ? null : FindRigPath(petRig, path);
+                if (mapped != null) return mapped;
+                if (current == playerRoot) break;
+                current = current.parent;
+            }
+            return null;
+        }
+
+        private static Transform GetPetEquipmentBone(NPC pet,
+            Item.SlotType slot, string sourceParentName)
+        {
+            Animator animator = pet?.GetComponent<Animator>();
+            if (animator == null || !animator.isHuman) return null;
+            bool left = sourceParentName != null &&
+                (sourceParentName.IndexOf("Left", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 sourceParentName.EndsWith("L", StringComparison.OrdinalIgnoreCase));
+            bool right = sourceParentName != null &&
+                (sourceParentName.IndexOf("Right", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 sourceParentName.EndsWith("R", StringComparison.OrdinalIgnoreCase));
+            HumanBodyBones bone;
+            switch (slot)
+            {
+                case Item.SlotType.Head:
+                    bone = HumanBodyBones.Head; break;
+                case Item.SlotType.Neck:
+                    bone = HumanBodyBones.Neck; break;
+                case Item.SlotType.Chest:
+                case Item.SlotType.Shoulder:
+                case Item.SlotType.Back:
+                case Item.SlotType.Aura:
+                case Item.SlotType.Charm:
+                    bone = HumanBodyBones.Chest; break;
+                case Item.SlotType.Arm:
+                    bone = right ? HumanBodyBones.RightUpperArm : HumanBodyBones.LeftUpperArm;
+                    break;
+                case Item.SlotType.Bracer:
+                    bone = right ? HumanBodyBones.RightLowerArm : HumanBodyBones.LeftLowerArm;
+                    break;
+                case Item.SlotType.Hand:
+                case Item.SlotType.Ring:
+                    bone = right ? HumanBodyBones.RightHand : HumanBodyBones.LeftHand;
+                    break;
+                case Item.SlotType.Foot:
+                    bone = right ? HumanBodyBones.RightFoot : HumanBodyBones.LeftFoot;
+                    break;
+                case Item.SlotType.Leg:
+                case Item.SlotType.Waist:
+                    bone = HumanBodyBones.Hips; break;
+                default:
+                    return null;
+            }
+            return animator.GetBoneTransform(bone);
+        }
+
+        private static void AttachArmorVisual(Transform visualRoot, NPC pet,
+            Animator playerAnimator, Transform playerRoot, Transform petRig,
+            Transform target, Transform source, Item item)
+        {
+            if (visualRoot == null || target == null || source == null) return;
+            GameObject clone = UnityEngine.Object.Instantiate(source.gameObject, target);
+            clone.name = "CS_PetGear_" + item.EquipmentToActivate;
+            clone.transform.SetParent(target, false);
+            clone.transform.localPosition = target.InverseTransformPoint(
+                source.position);
+            clone.transform.localRotation = Quaternion.Inverse(target.rotation) *
+                source.rotation;
+            clone.transform.localScale = DivideScale(source.lossyScale,
+                target.lossyScale);
+            clone.SetActive(true);
+            foreach (Transform child in clone.GetComponentsInChildren<Transform>(true))
+                child.gameObject.SetActive(true);
+            foreach (Collider collider in clone.GetComponentsInChildren<Collider>(true))
+                collider.enabled = false;
+
+            foreach (SkinnedMeshRenderer skin in
+                clone.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                if (!RebindArmorSkin(skin, playerAnimator, playerRoot, petRig))
+                {
+                    skin.enabled = false;
+                    SkillsPlugin.Log?.LogWarning(
+                        $"Thrall could not bind the skeleton for " +
+                        $"{item.ItemName} ({item.EquipmentToActivate}); " +
+                        "its skinned renderer was hidden to prevent it following the player.");
+                }
+            }
+            var tag = clone.AddComponent<NecromancerPetVisualTag>();
+            tag.VisualRoot = visualRoot;
+        }
+
+        private static bool RebindArmorSkin(SkinnedMeshRenderer skin,
+            Animator playerAnimator, Transform playerRoot, Transform petRig)
+        {
+            if (skin == null || playerAnimator == null || playerRoot == null ||
+                petRig == null) return false;
+            Transform[] sourceBones = skin.bones;
+            if (sourceBones == null || sourceBones.Length == 0) return false;
+            var petBones = new Transform[sourceBones.Length];
+            for (int i = 0; i < sourceBones.Length; i++)
+            {
+                string path = GetRelativeRigPath(sourceBones[i], playerRoot);
+                petBones[i] = path == null ? null : FindRigPath(petRig, path);
+                if (petBones[i] == null) return false;
+            }
+            string rootPath = GetRelativeRigPath(skin.rootBone, playerRoot);
+            Transform petRootBone = rootPath == null ? null :
+                FindRigPath(petRig, rootPath);
+            if (petRootBone == null) return false;
+            skin.bones = petBones;
+            skin.rootBone = petRootBone;
+            return true;
         }
 
         private static void ApplyPlayerCompatibleWeaponRig(NPC pet,
@@ -1462,74 +1927,57 @@ namespace ErenshorSkills.Necromancer
                 return false;
             }
 
-            int tier = Mathf.Clamp(marker.Tier, 1, 5);
-            int hpCap = 50 * tier * tier;
-            int statCap = 5 * tier;
-            int resistCap = 5 * tier;
             int primaryQuality = primary != null
                 ? NecromancerPetEquipment.Primary.Quality : 1;
             int secondaryQuality = secondary != null
                 ? NecromancerPetEquipment.Secondary.Quality : 1;
 
+            List<(Item item, int quality)> extraGear =
+                NecromancerPetEquipment.GetAdditionalThrallGear();
             int Pair(Func<Item, int, int> projection) =>
                 (primary != null ? projection(primary, primaryQuality) : 0) +
                 (secondary != null ? projection(secondary,
-                    secondaryQuality) : 0);
+                    secondaryQuality) : 0) +
+                extraGear.Sum(entry => projection(entry.item, entry.quality));
             int Ac(Item item, int quality)
             {
-                int cap = item.Shield
-                    ? TierShieldCap[tier] : 10 * tier * tier;
-                return Mathf.Clamp(item.CalcAC(item.AC, quality), -cap, cap);
+                return item.CalcAC(item.AC, quality);
             }
 
             bool valid =
                 inv.ItemHP - marker.BaseInventoryHp == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcACHPMC(item.HP, quality),
-                        -hpCap, hpCap)) &&
+                    item.CalcACHPMC(item.HP, quality)) &&
                 inv.ItemAC - marker.BaseInventoryAc == Pair(Ac) &&
                 pet.HardSetAC == marker.BasePetArmor + Mathf.Max(0, Pair(Ac)) &&
                 inv.ItemMana - marker.BaseInventoryMana == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcACHPMC(item.Mana, quality),
-                        -hpCap, hpCap)) &&
+                    item.CalcACHPMC(item.Mana, quality)) &&
                 inv.ItemStr - marker.BaseInventoryStr == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcStat(item.Str, quality),
-                        -statCap, statCap)) &&
+                    item.CalcStat(item.Str, quality)) &&
                 inv.ItemEnd - marker.BaseInventoryEnd == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcStat(item.End, quality),
-                        -statCap, statCap)) &&
+                    item.CalcStat(item.End, quality)) &&
                 inv.ItemDex - marker.BaseInventoryDex == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcStat(item.Dex, quality),
-                        -statCap, statCap)) &&
+                    item.CalcStat(item.Dex, quality)) &&
                 inv.ItemAgi - marker.BaseInventoryAgi == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcStat(item.Agi, quality),
-                        -statCap, statCap)) &&
+                    item.CalcStat(item.Agi, quality)) &&
                 inv.ItemInt - marker.BaseInventoryInt == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcStat(item.Int, quality),
-                        -statCap, statCap)) &&
+                    item.CalcStat(item.Int, quality)) &&
                 inv.ItemWis - marker.BaseInventoryWis == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcStat(item.Wis, quality),
-                        -statCap, statCap)) &&
+                    item.CalcStat(item.Wis, quality)) &&
                 inv.ItemCha - marker.BaseInventoryCha == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcStat(item.Cha, quality),
-                        -statCap, statCap)) &&
+                    item.CalcStat(item.Cha, quality)) &&
                 inv.ItemRes - marker.BaseInventoryRes == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcRes(item.Res, quality),
-                        -resistCap, resistCap)) &&
+                    item.CalcRes(item.Res, quality)) &&
                 inv.ItemMR - marker.BaseInventoryMr == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcResists(item.MR, quality),
-                        -resistCap, resistCap)) &&
+                    item.CalcResists(item.MR, quality)) &&
                 inv.ItemER - marker.BaseInventoryEr == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcResists(item.ER, quality),
-                        -resistCap, resistCap)) &&
+                    item.CalcResists(item.ER, quality)) &&
                 inv.ItemPR - marker.BaseInventoryPr == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcResists(item.PR, quality),
-                        -resistCap, resistCap)) &&
+                    item.CalcResists(item.PR, quality)) &&
                 inv.ItemVR - marker.BaseInventoryVr == Pair((item, quality) =>
-                    Mathf.Clamp(item.CalcResists(item.VR, quality),
-                        -resistCap, resistCap));
+                    item.CalcResists(item.VR, quality));
 
             detail = valid
-                ? "HP/mana/AC, seven attributes and five resist fields match both equipped item qualities and tier caps"
+                ? "HP/mana/AC, seven attributes and five resist fields match equipped item qualities without per-item caps"
                 : $"projection mismatch: HP={inv.ItemHP - marker.BaseInventoryHp}, " +
                   $"mana={inv.ItemMana - marker.BaseInventoryMana}, " +
                   $"AC={inv.ItemAC - marker.BaseInventoryAc}, " +

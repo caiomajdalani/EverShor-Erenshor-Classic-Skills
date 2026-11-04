@@ -405,6 +405,25 @@ namespace ErenshorSkills.Necromancer
             catch { return null; }
         }
 
+        internal static Item ResolveThrallBagItem(
+            Items.BagSystem.BagSlotData slot)
+        {
+            if (slot == null) return null;
+            if (!string.IsNullOrWhiteSpace(slot.ExactState))
+            {
+                if (!TryValidateExactStatePayload(slot.ExactState,
+                    slot.ItemId, slot.ItemName, slot.Quantity, out _))
+                    return null;
+                return ResolveExactStatePayload(slot.ExactState);
+            }
+            Item item = Items.ItemFactory.GetItemById(slot.ItemId);
+            if (item == null || item == GameData.PlayerInv?.Empty)
+                item = GameData.ItemDB?.GetItemByID(slot.ItemId);
+            if (item == null || item == GameData.PlayerInv?.Empty)
+                item = Items.ItemFactory.ResolveItem(slot.ItemName);
+            return item == GameData.PlayerInv?.Empty ? null : item;
+        }
+
         internal static bool TryCreateThrallBagSlot(Item item, int quality,
             out Items.BagSystem.BagSlotData entry, out string reason)
         {
@@ -421,10 +440,15 @@ namespace ErenshorSkills.Necromancer
                 reason = "only a Necromancer can bind gear to a thrall";
                 return false;
             }
-            if (!IsThrallBagEligible(item, out reason)) return false;
             if (quality <= 0)
             {
                 reason = "that item has an invalid quality value";
+                return false;
+            }
+            if (item.Stackable || (item.RequiredSlot == Item.SlotType.General &&
+                item.Aura == null))
+            {
+                reason = "the Thrall accepts equipment only; general and stackable items do not fit gear slots";
                 return false;
             }
             NecromancerPetGearItem state = Capture(item, quality);
@@ -625,8 +649,8 @@ namespace ErenshorSkills.Necromancer
             }
             NecromancerPets.ApplyEscrowToActivePet();
             detail = contents.Count == 0
-                ? "Thrall Bag is empty"
-                : $"equipped {contents.Count} Thrall Bag item(s)";
+                ? "Thrall inventory is empty"
+                : $"synchronized {contents.Count} Thrall inventory item(s)";
             return true;
         }
 
@@ -655,40 +679,92 @@ namespace ErenshorSkills.Necromancer
                 reason = "the Thrall Bag contents are unavailable";
                 return false;
             }
-            if (contents.Count > 2)
+            if (contents.Count > Items.BagSystem.GetBagSlots(
+                Items.BagSystem.ThrallBagName))
             {
-                reason = "a thrall can equip at most two objects: one two-handed " +
-                    "weapon or bow, or one one-handed weapon with a shield/offhand";
+                reason = "the Thrall inventory is full";
                 return false;
             }
 
-            var states = new List<NecromancerPetGearItem>(contents.Count);
-            var items = new List<Item>(contents.Count);
+            var states = new List<NecromancerPetGearItem>(2);
+            var items = new List<Item>(2);
+            var occupiedSlots = new Dictionary<Item.SlotType, int>();
             foreach (Items.BagSystem.BagSlotData slot in contents)
             {
-                string payloadError = null;
-                if (slot == null || string.IsNullOrWhiteSpace(slot.ExactState) ||
-                    !TryValidateExactStatePayload(slot.ExactState,
+                if (slot == null || slot.Quantity <= 0 ||
+                    string.IsNullOrWhiteSpace(slot.ItemName))
+                {
+                    reason = "an inventory item has invalid identity or quantity";
+                    return false;
+                }
+                Item item;
+                NecromancerPetGearItem state = null;
+                if (!string.IsNullOrWhiteSpace(slot.ExactState))
+                {
+                    if (!TryValidateExactStatePayload(slot.ExactState,
                         slot.ItemId, slot.ItemName, slot.Quantity,
-                        out payloadError))
+                        out string payloadError))
+                    {
+                        reason = "an exact item snapshot is invalid: " + payloadError;
+                        return false;
+                    }
+                    try { state = DecodeItem(slot.ExactState); }
+                    catch (Exception ex)
+                    {
+                        reason = "an item snapshot could not be decoded: " + ex.Message;
+                        return false;
+                    }
+                    item = Resolve(state);
+                }
+                else
                 {
-                    reason = "an exact item snapshot is missing or invalid" +
-                        (string.IsNullOrEmpty(payloadError)
-                            ? "" : ": " + payloadError);
+                    item = Items.ItemFactory.GetItemById(slot.ItemId);
+                    if (item == null || item == GameData.PlayerInv?.Empty)
+                        item = GameData.ItemDB?.GetItemByID(slot.ItemId);
+                    if (item == null || item == GameData.PlayerInv?.Empty)
+                        item = Items.ItemFactory.ResolveItem(slot.ItemName);
+                }
+                if (item == null || item == GameData.PlayerInv?.Empty)
+                {
+                    reason = $"{slot.ItemName} could not be resolved";
                     return false;
                 }
-                NecromancerPetGearItem state;
-                try { state = DecodeItem(slot.ExactState); }
-                catch (Exception ex)
+                if (item.Stackable || (item.RequiredSlot == Item.SlotType.General &&
+                    item.Aura == null))
+                    continue;
+
+                // Only hand weapons and shields occupy the combat loadout.
+                // Other wearable items stay in inventory and add their own stats.
+                if (item.WeaponDmg > 0 || item.Shield)
                 {
-                    reason = "an equipped item snapshot could not be decoded: " +
-                        ex.Message;
-                    return false;
+                    if (!IsThrallBagEligible(item, out reason)) return false;
+                    if (state == null)
+                        state = Capture(item, slot.Quantity);
+                    states.Add(state);
+                    items.Add(item);
                 }
-                Item item = Resolve(state);
-                if (!IsThrallBagEligible(item, out reason)) return false;
-                states.Add(state);
-                items.Add(item);
+                else
+                {
+                    Item.SlotType itemSlot = item.Aura != null
+                        ? Item.SlotType.Aura : item.RequiredSlot;
+                    int capacity = GetThrallEquipmentSlotCapacity(itemSlot);
+                    occupiedSlots.TryGetValue(itemSlot,
+                        out int equippedCount);
+                    if (equippedCount >= capacity)
+                    {
+                        reason = $"the thrall already has an item in the " +
+                            $"{itemSlot} slot";
+                        return false;
+                    }
+                    occupiedSlots[itemSlot] = equippedCount + 1;
+                }
+            }
+
+            if (items.Count > 2)
+            {
+                reason = "the thrall can equip only one primary and one offhand " +
+                    "weapon, or one two-handed weapon";
+                return false;
             }
 
             NecromancerPetGearItem primary = null;
@@ -738,6 +814,46 @@ namespace ErenshorSkills.Necromancer
                 ThrallBagId = bagId
             };
             return true;
+        }
+
+        private static int GetThrallEquipmentSlotCapacity(Item.SlotType type)
+        {
+            List<ItemIcon> slots = Items.BagSystem
+                .GetThrallEquipmentSlots();
+            if (type == Item.SlotType.PrimaryOrSecondary)
+                return Math.Max(1, slots.Count(slot => slot != null &&
+                    (slot.ThisSlotType == Item.SlotType.Primary ||
+                     slot.ThisSlotType == Item.SlotType.Secondary)));
+            return Math.Max(1, slots.Count(slot => slot != null &&
+                slot.ThisSlotType == type));
+        }
+
+        internal static List<(Item item, int quality)> GetAdditionalThrallGear()
+        {
+            var result = new List<(Item item, int quality)>();
+            if (!Items.BagSystem.TryGetSingleCarriedThrallBag(out _,
+                out List<Items.BagSystem.BagSlotData> contents, out _) ||
+                contents == null) return result;
+            foreach (Items.BagSystem.BagSlotData slot in contents)
+            {
+                if (slot == null || slot.IsStackable ||
+                    string.IsNullOrWhiteSpace(slot.ExactState)) continue;
+                NecromancerPetGearItem state;
+                try { state = DecodeItem(slot.ExactState); }
+                catch { continue; }
+                Item item = Resolve(state);
+                if (item == null || item == GameData.PlayerInv?.Empty ||
+                    item.Stackable || (item.RequiredSlot == Item.SlotType.General &&
+                    item.Aura == null))
+                    continue;
+                if ((Primary != null && string.Equals(state.ItemId, Primary.ItemId,
+                        StringComparison.OrdinalIgnoreCase) && state.Quality == Primary.Quality) ||
+                    (Secondary != null && string.Equals(state.ItemId, Secondary.ItemId,
+                        StringComparison.OrdinalIgnoreCase) && state.Quality == Secondary.Quality))
+                    continue;
+                result.Add((item, state.Quality));
+            }
+            return result;
         }
 
         private static bool IsThrallBagEligible(Item item, out string reason)
@@ -1101,7 +1217,7 @@ namespace ErenshorSkills.Necromancer
             var entries = new List<(Item item, int quality)>();
             foreach (Items.BagSystem.BagSlotData slot in contents)
             {
-                Item item = ResolveExactStatePayload(slot?.ExactState);
+                Item item = ResolveThrallBagItem(slot);
                 if (item == null)
                 {
                     detail = $"{slot?.ItemName ?? "an item"} could not be " +

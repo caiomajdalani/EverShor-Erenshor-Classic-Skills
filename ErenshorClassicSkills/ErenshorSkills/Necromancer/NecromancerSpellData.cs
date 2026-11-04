@@ -71,6 +71,7 @@ namespace ErenshorSkills.Necromancer
         internal bool BreakOnAnyAction;
         internal bool GrantInvisibility;
         internal bool HiddenEffect;
+        internal bool SimUsable = true;
         internal string AppliedEffectKey;
     }
 
@@ -136,7 +137,7 @@ namespace ErenshorSkills.Necromancer
                     "Draws darkness around the caster, granting invisibility for up to one minute.",
                     "Shadow", NecromancerVfxStyle.Shadow,
                     new Color(0.16f, 0.08f, 0.32f), grantInvisibility: true,
-                    cooldown: 8f),
+                    cooldown: 8f, simUsable: false),
 
                 Pet("bone_thrall_2", "Risen Sentry", 8, 180, 2,
                     "Raises a sturdier skeletal warrior with improved offense and defenses."),
@@ -378,7 +379,7 @@ namespace ErenshorSkills.Necromancer
             string icon, NecromancerVfxStyle vfx, Color color, int hp = 0,
             int ac = 0, int damageShield = 0,
             bool grantInvisibility = false, float cast = 2f,
-            float cooldown = 5f)
+            float cooldown = 5f, bool simUsable = true)
         {
             return new NecromancerSpellDefinition
             {
@@ -391,6 +392,7 @@ namespace ErenshorSkills.Necromancer
                 VfxColor = color, ManaCost = mana, DurationTicks = duration,
                 Hp = hp, Ac = ac, DamageShield = damageShield,
                 GrantInvisibility = grantInvisibility, SelfOnly = true,
+                SimUsable = simUsable,
                 CastSeconds = cast, CooldownSeconds = cooldown,
                 Aggro = 0
             };

@@ -94,8 +94,25 @@ namespace ErenshorSkills.Necromancer
                     "). Try again.";
                 return false;
             }
-            if (!NecromancerCatalog.IsNecromancerClass(
-                    caster?.MyChar?.MyStats?.CharacterClass))
+            NecromancerPetMarker petMarker = caster?.MyChar != null
+                ? caster.MyChar.GetComponent<NecromancerPetMarker>() : null;
+            if (petMarker != null)
+            {
+                NPC pet = caster.MyChar.GetComponent<NPC>();
+                bool assigned = pet != null &&
+                    (pet.MyAttackSpells?.Contains(spell) == true ||
+                     pet.MyBuffSpells?.Contains(spell) == true ||
+                     pet.MyTauntSpell?.Contains(spell) == true);
+                if (definition.Kind != NecromancerSpellKind.Native ||
+                    !assigned || definition.Fear || definition.Root ||
+                    definition.SelfOnly)
+                {
+                    denial = "That spell is not available to this Bone Thrall.";
+                    return false;
+                }
+            }
+            else if (!NecromancerCatalog.IsNecromancerClass(
+                         caster?.MyChar?.MyStats?.CharacterClass))
             {
                 denial = "Only a Necromancer can cast that spell.";
                 return false;

@@ -4,116 +4,95 @@
     <TargetFramework>netstandard2.1</TargetFramework>
     <AssemblyName>ErenshorClassicSkills</AssemblyName>
     <RootNamespace>ErenshorSkills</RootNamespace>
-    <Version>1.8.4</Version>
+    <Version>1.9.0</Version>
     <LangVersion>latest</LangVersion>
+    <ReferenceDirectory Condition="'$(ReferenceDirectory)' == ''">lib</ReferenceDirectory>
   </PropertyGroup>
 
-  <!-- 
-    BUILD INSTRUCTIONS:
-    1. Create a "lib" folder next to this .csproj
-    2. Copy the following DLLs into lib/:
-    
-       From BepInEx/core/:
-         - BepInEx.dll
-         - 0Harmony.dll
-    
-       From Erenshor_Data/Managed/:
-         - Assembly-CSharp.dll   (Erenshor's game code)
-         - UnityEngine.dll
-         - UnityEngine.CoreModule.dll
-         - UnityEngine.IMGUIModule.dll
-         - UnityEngine.UIModule.dll
-         - UnityEngine.InputLegacyModule.dll
-         - UnityEngine.PhysicsModule.dll
-         - UnityEngine.ParticleSystemModule.dll
-         - UnityEngine.AIModule.dll
-         - UnityEngine.JSONSerializeModule.dll
-         - UnityEngine.ImageConversionModule.dll
-         - UnityEngine.AudioModule.dll
-       - UnityEngine.AnimationModule.dll
-       - UnityEngine.TextRenderingModule.dll
-       - UnityEngine.ScreenCaptureModule.dll
-         - UnityEngine.UI.dll
-         - Unity.TextMeshPro.dll
-    
-    3. Run:  dotnet build
-    4. Copy bin/Release/netstandard2.1/ErenshorClassicSkills.dll
-       into Erenshor/BepInEx/plugins/
+  <!--
+    BUILD INSTRUCTIONS (native Lunaris):
+    1. Place Lunaris.dll and the game/Unity reference assemblies in $(ReferenceDirectory)/.
+    2. Keep 0Harmony.dll as a compile-time reference from the current Lunaris release.
+    3. Run dotnet build -c Release.
+    4. Install the output DLL in Erenshor/plugins/. Do not bundle Lunaris.dll or
+       0Harmony.dll: the Lunaris runtime supplies them.
   -->
 
   <ItemGroup>
-    <Reference Include="BepInEx">
-      <HintPath>lib\BepInEx.dll</HintPath>
+    <Reference Include="Lunaris">
+      <HintPath>$(ReferenceDirectory)\Lunaris.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>lib\0Harmony.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Assembly-CSharp">
-      <HintPath>lib\Assembly-CSharp.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine">
-      <HintPath>lib\UnityEngine.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\UnityEngine.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>lib\UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">
-      <HintPath>lib\UnityEngine.IMGUIModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.InputLegacyModule">
-      <HintPath>lib\UnityEngine.InputLegacyModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\UnityEngine.InputLegacyModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.PhysicsModule">
-      <HintPath>lib\UnityEngine.PhysicsModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\UnityEngine.PhysicsModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.ParticleSystemModule">
-      <HintPath>lib\UnityEngine.ParticleSystemModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\UnityEngine.ParticleSystemModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.AIModule">
-      <HintPath>lib\UnityEngine.AIModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\UnityEngine.AIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.JSONSerializeModule">
-      <HintPath>lib/UnityEngine.JSONSerializeModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)/UnityEngine.JSONSerializeModule.dll</HintPath>
+      <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.ImageConversionModule">
-      <HintPath>lib/UnityEngine.ImageConversionModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)/UnityEngine.ImageConversionModule.dll</HintPath>
+      <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.UI">
-      <HintPath>lib/UnityEngine.UI.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)/UnityEngine.UI.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.UIModule">
-      <HintPath>lib/UnityEngine.UIModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)/UnityEngine.UIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.TextRenderingModule">
-      <HintPath>lib\UnityEngine.TextRenderingModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\UnityEngine.TextRenderingModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Unity.TextMeshPro">
-      <HintPath>lib\Unity.TextMeshPro.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\Unity.TextMeshPro.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.AudioModule">
-      <HintPath>lib\UnityEngine.AudioModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\UnityEngine.AudioModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.AnimationModule">
-      <HintPath>lib\UnityEngine.AnimationModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\UnityEngine.AnimationModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.ScreenCaptureModule">
-      <HintPath>lib\UnityEngine.ScreenCaptureModule.dll</HintPath>
+      <HintPath>$(ReferenceDirectory)\UnityEngine.ScreenCaptureModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

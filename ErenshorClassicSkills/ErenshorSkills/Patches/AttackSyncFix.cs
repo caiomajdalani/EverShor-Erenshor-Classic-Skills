@@ -2,7 +2,6 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
-using BepInEx.Configuration;
 using ErenshorSkills.Monk;
 using HarmonyLib;
 using UnityEngine;
@@ -16,7 +15,7 @@ namespace ErenshorSkills.Patches
     // ═══════════════════════════════════════════════════════════════════
 
     /// <summary>Config entries for attack sync timing.</summary>
-    public static class AttackSyncConfig
+    internal static class AttackSyncConfig
     {
         public static ConfigEntry<float> PlayerHitFraction;
         public static ConfigEntry<float> NPCHitFraction;
@@ -27,28 +26,29 @@ namespace ErenshorSkills.Patches
         public static ConfigEntry<bool> SyncSimPlayerAttacks;
         public static ConfigEntry<bool> DebugLogging;
 
-        public static void Init(BepInEx.Configuration.ConfigFile cfg)
+        public static void Init(ClassicSkillsSettings settings)
         {
-            PlayerHitFraction = cfg.Bind("AttackSync", "PlayerHitFraction", 0.45f,
-                new ConfigDescription("Fraction of swing animation when hit lands.",
-                    new AcceptableValueRange<float>(0.1f, 0.9f)));
-            NPCHitFraction = cfg.Bind("AttackSync", "NPCHitFraction", 0.40f,
-                new ConfigDescription("Fraction of NPC swing when hit sound plays.",
-                    new AcceptableValueRange<float>(0.1f, 0.9f)));
-            MinHitDelay = cfg.Bind("AttackSync", "MinHitDelay", 0.08f,
-                new ConfigDescription("Minimum hit delay in seconds.",
-                    new AcceptableValueRange<float>(0.02f, 0.3f)));
-            MaxHitDelay = cfg.Bind("AttackSync", "MaxHitDelay", 0.8f,
-                new ConfigDescription("Maximum hit delay in seconds.",
-                    new AcceptableValueRange<float>(0.2f, 2.0f)));
-            SyncPlayerAttacks = cfg.Bind("AttackSync", "SyncPlayerAttacks", true,
-                "Enable sync fix for player melee auto-attacks.");
-            SyncNPCAttacks = cfg.Bind("AttackSync", "SyncNPCAttacks", true,
-                "Enable sync fix for NPC/enemy melee attacks.");
-            SyncSimPlayerAttacks = cfg.Bind("AttackSync", "SyncSimPlayerAttacks", true,
-                "Enable sync fix for SimPlayer (party member) melee attacks.");
-            DebugLogging = cfg.Bind("AttackSync", "DebugLogging", false,
-                "Log animation lengths and computed delays.");
+            if (settings == null) throw new ArgumentNullException(nameof(settings));
+            PlayerHitFraction = SkillsPlugin.CreateConfigEntry(nameof(settings.PlayerHitFraction), () => settings.PlayerHitFraction, v => settings.PlayerHitFraction = v);
+            NPCHitFraction = SkillsPlugin.CreateConfigEntry(nameof(settings.NPCHitFraction), () => settings.NPCHitFraction, v => settings.NPCHitFraction = v);
+            MinHitDelay = SkillsPlugin.CreateConfigEntry(nameof(settings.MinHitDelay), () => settings.MinHitDelay, v => settings.MinHitDelay = v);
+            MaxHitDelay = SkillsPlugin.CreateConfigEntry(nameof(settings.MaxHitDelay), () => settings.MaxHitDelay, v => settings.MaxHitDelay = v);
+            SyncPlayerAttacks = SkillsPlugin.CreateConfigEntry(nameof(settings.SyncPlayerAttacks), () => settings.SyncPlayerAttacks, v => settings.SyncPlayerAttacks = v);
+            SyncNPCAttacks = SkillsPlugin.CreateConfigEntry(nameof(settings.SyncNPCAttacks), () => settings.SyncNPCAttacks, v => settings.SyncNPCAttacks = v);
+            SyncSimPlayerAttacks = SkillsPlugin.CreateConfigEntry(nameof(settings.SyncSimPlayerAttacks), () => settings.SyncSimPlayerAttacks, v => settings.SyncSimPlayerAttacks = v);
+            DebugLogging = SkillsPlugin.CreateConfigEntry(nameof(settings.DebugLogging), () => settings.DebugLogging, v => settings.DebugLogging = v);
+        }
+
+        public static void Reset()
+        {
+            PlayerHitFraction = null;
+            NPCHitFraction = null;
+            MinHitDelay = null;
+            MaxHitDelay = null;
+            SyncPlayerAttacks = null;
+            SyncNPCAttacks = null;
+            SyncSimPlayerAttacks = null;
+            DebugLogging = null;
         }
     }
 
@@ -115,15 +115,16 @@ namespace ErenshorSkills.Patches
             // Wands and bows use their own code path — let vanilla handle them
             if (isWand || isBow) return true;
 
+            // This setting must fully restore the game's native player
+            // attack path, including Monk handwraps. Previously handwraps
+            // bypassed the opt-out and still ran the replacement combat
+            // coroutine, so disabling Sync Player Attacks did not actually
+            // isolate player melee from this patch.
+            if (!AttackSyncConfig.SyncPlayerAttacks.Value)
+                return true;
+
             bool useHandwrapAnimation =
                 MonkRuntime.UsesHandwrapAutoAnimation(isMainHand);
-            // Handwraps always need the replacement path so Erenshor never
-            // layers its invisible one-handed weapon swing over the authored
-            // punches. Attack synchronization remains optional for every
-            // other weapon.
-            if (!AttackSyncConfig.SyncPlayerAttacks.Value &&
-                !useHandwrapAnimation)
-                return true;
             if (target == null || !target.Alive) return true;
 
             bool inRange = SyncReflection.CallCheckForRange(__instance, isWand, isBow, target);

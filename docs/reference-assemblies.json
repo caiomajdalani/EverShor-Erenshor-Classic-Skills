@@ -1,0 +1,101 @@
+{
+  "recordedOn": "2026-11-04",
+  "provenance": "Local reference set inherited from the native Lunaris 1.9.0 migration; game branch not independently certified",
+  "references": [
+    {
+      "file": "Lunaris.dll",
+      "sha256": "8b5b1f1c39f7df31b240ecdd04aeb8fb054acdfbba35b87d16a903bd7764e920",
+      "assemblyVersion": "0.1.0.0"
+    },
+    {
+      "file": "0Harmony.dll",
+      "sha256": "1a21cc03424fc82c3dd1346905d16494536b9595ae4162228d99fb7c285c1031",
+      "assemblyVersion": "2.9.0.0"
+    },
+    {
+      "file": "Assembly-CSharp.dll",
+      "sha256": "b840cb8076ed0553f7dc3beb4042aba653917882f763181ec0d2c13c26c17847",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.dll",
+      "sha256": "9a12de40d47d4c054025d79c2243b8abc781a662336af2068440b2cb67d14c1e",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.CoreModule.dll",
+      "sha256": "6305c82c17ffe111a016e8d8ca3e8b2d9203980b4f58cb6e90171e5629994290",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.IMGUIModule.dll",
+      "sha256": "87c2364c9ed726c3bc23c14372eeed53a7ec7becd6b82a18c3516d81b66959aa",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.InputLegacyModule.dll",
+      "sha256": "baf0b5dc09c0e53472764f99229fa302529f285c133f0648eba2a370b9cc3284",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.PhysicsModule.dll",
+      "sha256": "bb2479e5abf7fa41be1bbe21781dacda5289be95b7a8506e67a28c712ecdb60a",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.ParticleSystemModule.dll",
+      "sha256": "50953d04f22b4309b9ef6f2b607bbe2c88f68da5bfcd92dd6f7098845fc36dcf",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.AIModule.dll",
+      "sha256": "0e146e4f4ce075a50d729caf8fa325119ceda197d4487c963f6a8586ac2f477f",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.JSONSerializeModule.dll",
+      "sha256": "a5f2e3b3bdc5899db172e964690bc18459eb3ca9dcd989df41c662ceec4834a9",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.ImageConversionModule.dll",
+      "sha256": "a9fef4839c01e13bf7765643abd4cf033ba5ed47d695cff008d8fab99172295a",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.UI.dll",
+      "sha256": "8324e202ce45c1fca88e3903c646dd5b70f78d75edc3724efb104b29c97c6897",
+      "assemblyVersion": "1.0.0.0"
+    },
+    {
+      "file": "UnityEngine.UIModule.dll",
+      "sha256": "6935840627678481761e168e19a51e8be837812fc458ae8ebc37d02760e725de",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.TextRenderingModule.dll",
+      "sha256": "08af4550bccab28a7d1b59a4ec9690c32e2ac75e19ff4ebbd61e0ef65d9f7778",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "Unity.TextMeshPro.dll",
+      "sha256": "418faad8a3505120e186d77459dc8288412139a648d52ec73ae744a8cdb40e61",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.AudioModule.dll",
+      "sha256": "7a642d3965fc0c9d43900b0687cfd993f0a2e4ad097ebaefd936fa51e7da042e",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.AnimationModule.dll",
+      "sha256": "64168fae79224376a898cb9decb7a579dd6cf4e8e6ce3984e879b84b5085f3a9",
+      "assemblyVersion": "0.0.0.0"
+    },
+    {
+      "file": "UnityEngine.ScreenCaptureModule.dll",
+      "sha256": "9ef7ab6c002b928fd14640b09c356e4f78d933e912ed6a735007ad46fed8fb6b",
+      "assemblyVersion": "0.0.0.0"
+    }
+  ]
+}

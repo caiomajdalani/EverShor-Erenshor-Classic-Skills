@@ -1,120 +1,80 @@
-#!/bin/bash
-# ═══════════════════════════════════════════════════════════════
-# ErenshorClassicSkills — Build & Install Script
-# Run from the extracted ErenshorClassicSkills/ directory
-# ═══════════════════════════════════════════════════════════════
+#!/usr/bin/env bash
+set -euo pipefail
 
-# ── Configuration ─────────────────────────────────────────────
-# ERENSHOR_DIR can be supplied explicitly. Otherwise detect common Steam
-# libraries, including the secondary library used on this machine.
-if [ -z "${ERENSHOR_DIR:-}" ]; then
-    for candidate in \
-        "/mnt/games/steamapps/common/Erenshor" \
-        "$HOME/.local/share/Steam/steamapps/common/Erenshor" \
-        "$HOME/.steam/steam/steamapps/common/Erenshor" \
-        "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/Erenshor"; do
-        if [ -d "$candidate" ]; then
-            ERENSHOR_DIR="$candidate"
-            break
-        fi
-    done
-fi
+# Erenshor Classic Skills — native Lunaris build
+#
+# Default: compile only, using the locally supplied public-game and Lunaris references.
+# Optional install: INSTALL=1 ERENSHOR_DIR="/path/to/Erenshor" ./build.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR" || exit 1
-MANAGED_DIR="$ERENSHOR_DIR/Erenshor_Data/Managed"
-BEPINEX_DIR="$ERENSHOR_DIR/BepInEx"
-BEPINEX_CORE="$BEPINEX_DIR/core"
-PLUGINS_DIR="$BEPINEX_DIR/plugins"
-
-PROJECT_DIR="ErenshorSkills"
+PROJECT_DIR="$SCRIPT_DIR/ErenshorSkills"
 LIB_DIR="$PROJECT_DIR/lib"
 OUTPUT_DLL="$PROJECT_DIR/bin/Release/netstandard2.1/ErenshorClassicSkills.dll"
+INSTALL_MODE="${INSTALL:-0}"
+ERENSHOR_DIR="${ERENSHOR_DIR:-}"
 
-echo "═══════════════════════════════════════════"
-echo "  ErenshorClassicSkills Build Script"
-echo "═══════════════════════════════════════════"
-echo ""
-
-# ── Verify paths ─────────────────────────────────────────────
-if [ ! -d "$ERENSHOR_DIR" ]; then
-    echo "ERROR: Erenshor not found. Set ERENSHOR_DIR to the game directory."
+if ! command -v dotnet >/dev/null 2>&1; then
+    echo "ERROR: .NET SDK (dotnet) is required to compile the plugin."
     exit 1
 fi
 
-if [ ! -d "$BEPINEX_CORE" ]; then
-    echo "ERROR: BepInEx not found at $BEPINEX_DIR"
-    echo "Install BepInEx first:"
-    echo "  https://thunderstore.io/c/erenshor/p/BepInEx/BepInExPack/"
-    exit 1
-fi
+# The reference assemblies in lib/ are pinned to the public Erenshor build
+# used by this source release. Do not refresh them automatically from an
+# arbitrary local install: that could silently retarget a playtest branch.
+required=(
+    "Lunaris.dll"
+    "0Harmony.dll"
+    "Assembly-CSharp.dll"
+    "UnityEngine.dll"
+    "UnityEngine.CoreModule.dll"
+    "UnityEngine.IMGUIModule.dll"
+    "UnityEngine.InputLegacyModule.dll"
+    "UnityEngine.PhysicsModule.dll"
+    "UnityEngine.ParticleSystemModule.dll"
+    "UnityEngine.AIModule.dll"
+    "UnityEngine.JSONSerializeModule.dll"
+    "UnityEngine.ImageConversionModule.dll"
+    "UnityEngine.UI.dll"
+    "UnityEngine.UIModule.dll"
+    "UnityEngine.TextRenderingModule.dll"
+    "Unity.TextMeshPro.dll"
+    "UnityEngine.AudioModule.dll"
+    "UnityEngine.AnimationModule.dll"
+    "UnityEngine.ScreenCaptureModule.dll"
+)
 
-echo "✓ Erenshor: $ERENSHOR_DIR"
-echo "✓ BepInEx:  $BEPINEX_DIR"
-echo ""
-
-# ── Copy DLLs to lib/ ────────────────────────────────────────
-echo "Copying DLLs to lib/ ..."
-mkdir -p "$LIB_DIR"
-
-cp "$BEPINEX_CORE/BepInEx.dll"  "$LIB_DIR/" 2>/dev/null && echo "  ✓ BepInEx.dll"  || echo "  ✗ BepInEx.dll"
-cp "$BEPINEX_CORE/0Harmony.dll" "$LIB_DIR/" 2>/dev/null && echo "  ✓ 0Harmony.dll" || echo "  ✗ 0Harmony.dll"
-
-for dll in Assembly-CSharp.dll UnityEngine.dll UnityEngine.CoreModule.dll \
-           UnityEngine.IMGUIModule.dll UnityEngine.UIModule.dll UnityEngine.InputLegacyModule.dll \
-           UnityEngine.PhysicsModule.dll UnityEngine.TextRenderingModule.dll UnityEngine.JSONSerializeModule.dll \
-           UnityEngine.ImageConversionModule.dll \
-           UnityEngine.UI.dll \
-           UnityEngine.AudioModule.dll \
-           UnityEngine.AnimationModule.dll \
-           UnityEngine.ParticleSystemModule.dll \
-           UnityEngine.ScreenCaptureModule.dll \
-           UnityEngine.AIModule.dll \
-           Unity.TextMeshPro.dll; do
-    cp "$MANAGED_DIR/$dll" "$LIB_DIR/" 2>/dev/null && echo "  ✓ $dll" || echo "  ✗ $dll"
+for dll in "${required[@]}"; do
+    if [[ ! -s "$LIB_DIR/$dll" ]]; then
+        echo "ERROR: Required reference is missing: $LIB_DIR/$dll"
+        exit 1
+    fi
 done
-echo ""
 
-# ── Sync embedded resources (icons + models) ─────────────────
-ICON_SRC="$PLUGINS_DIR/ClassicSkills/Icons"
-MODEL_SRC="$PLUGINS_DIR/ClassicSkills/Models"
+# Guard the target game references so the public release target is explicit.
+if [[ -f "$LIB_DIR/Assembly-CSharp.dll" ]]; then
+    echo "✓ Using the checked-in public Erenshor game references"
+fi
+echo "✓ Using the local Lunaris native API reference"
+echo "✓ BepInEx is not a compile-time or runtime dependency"
+
+# Keep packaged icon/model resources authoritative. The original release's
+# catalog is already present in Resources and is embedded into the plugin DLL.
 RES_ICONS="$PROJECT_DIR/Resources/Icons"
 RES_MODELS="$PROJECT_DIR/Resources/Models"
-
 mkdir -p "$RES_ICONS" "$RES_MODELS"
 
-if [ -d "$ICON_SRC" ]; then
-    # Merge user-overridable disk icons into the embedded source catalog.
-    # Do not delete source-only class assets: Monk/Necromancer spell, tome,
-    # aura, gear, and class icons are intentionally embedded even when the
-    # external override folder does not contain copies of them.
-    rsync -a "$ICON_SRC/" "$RES_ICONS/" 2>/dev/null || \
-        cp -u "$ICON_SRC/"*.png "$RES_ICONS/" 2>/dev/null
-    echo "✓ Synced $(ls "$RES_ICONS/" | wc -l) icons into DLL resources"
-fi
-if [ -d "$MODEL_SRC" ]; then
-    rsync -a --delete "$MODEL_SRC/" "$RES_MODELS/" 2>/dev/null || \
-        cp -u "$MODEL_SRC/"* "$RES_MODELS/" 2>/dev/null
-    echo "✓ Synced $(ls "$RES_MODELS/" | wc -l) model files into DLL resources"
-fi
-echo ""
-
-# Refuse to publish a build that would render custom class content as white
-# tiles or silently fall back to repeated native spell icons.
 require_icon_count() {
-    pattern="$1"
-    expected="$2"
-    label="$3"
-    actual="$(find "$RES_ICONS" -maxdepth 1 -type f -name "$pattern" \
-        -size +0c | wc -l)"
-    if [ "$actual" -ne "$expected" ]; then
+    local pattern="$1" expected="$2" label="$3"
+    local actual
+    actual="$(find "$RES_ICONS" -maxdepth 1 -type f -name "$pattern" -size +0c | wc -l | tr -d ' ')"
+    if [[ "$actual" -ne "$expected" ]]; then
         echo "ERROR: $label icon catalog is incomplete ($actual/$expected)."
         return 1
     fi
     echo "  ✓ $label icons: $actual/$expected"
 }
 
-echo "Validating required custom class icons ..."
+echo "Validating custom class icon catalogs ..."
 ICON_VALID=0
 require_icon_count "Monk Skill *.png" 32 "Monk skill" || ICON_VALID=1
 require_icon_count "Monk Tome *.png" 32 "Monk tome" || ICON_VALID=1
@@ -129,76 +89,73 @@ require_icon_count "Necromancer Aura Spell *.png" 5 "Necromancer aura effect" ||
 require_icon_count "Necromancer Gear *.png" 5 "Necromancer gear" || ICON_VALID=1
 require_icon_count "Necromancer Class.png" 1 "Necromancer class" || ICON_VALID=1
 require_icon_count "Corpse Bag.png" 1 "Corpse Bag" || ICON_VALID=1
-ICON_DUPLICATE_HASHES="$(find "$RES_ICONS" -maxdepth 1 -type f \
-    -name "*.png" -print0 | xargs -0 sha256sum | cut -d' ' -f1 | \
-    sort | uniq -d | wc -l)"
-if [ "$ICON_DUPLICATE_HASHES" -ne 0 ]; then
-    echo "ERROR: embedded icon catalog contains $ICON_DUPLICATE_HASHES exact duplicate image hash(es)."
+DUPLICATES="$(find "$RES_ICONS" -maxdepth 1 -type f -name '*.png' -print0 | xargs -0 -r sha256sum | cut -d' ' -f1 | sort | uniq -d | wc -l | tr -d ' ')"
+if [[ "$DUPLICATES" -ne 0 ]]; then
+    echo "ERROR: icon catalog contains $DUPLICATES duplicate image hash(es)."
     ICON_VALID=1
 else
-    echo "  ✓ Embedded icon PNG content is exact-hash unique"
+    echo "  ✓ PNG catalog has no exact duplicate image hashes"
 fi
-if [ "$ICON_VALID" -ne 0 ]; then
-    echo "BUILD ABORTED: restore or regenerate the missing unique icons."
-    exit 1
-fi
-echo ""
-
-# ── Build ─────────────────────────────────────────────────────
-echo "Building..."
-cd "$PROJECT_DIR" || exit 1
-dotnet build -c Release 2>&1
-BUILD_RESULT=$?
-cd ..
-
-if [ $BUILD_RESULT -ne 0 ]; then
-    echo ""
-    echo "BUILD FAILED."
-    echo "  - Check that all DLLs copied to lib/"
-    echo "  - Install .NET SDK: sudo pacman -S dotnet-sdk"
+if [[ "$ICON_VALID" -ne 0 ]]; then
+    echo "BUILD ABORTED: restore the missing/duplicate icon assets."
     exit 1
 fi
 
-echo ""
-echo "✓ Build successful"
+printf '
+Building native Lunaris plugin...
+'
+dotnet build "$PROJECT_DIR/ErenshorClassicSkills.csproj" -c Release
 
-# ── Install ──────────────────────────────────────────────────
-echo "Installing to plugins/ ..."
-if pgrep -f '[E]renshor\.exe' >/dev/null; then
-    echo "ERROR: Erenshor is running. Exit the game before installing a DLL."
+if [[ ! -s "$OUTPUT_DLL" ]]; then
+    echo "ERROR: build completed without the expected DLL: $OUTPUT_DLL"
     exit 1
 fi
+
+echo "✓ Build successful: $OUTPUT_DLL ($(du -h "$OUTPUT_DLL" | cut -f1))"
+
+if [[ "$INSTALL_MODE" != "1" ]]; then
+    echo "Build-only mode. To install: INSTALL=1 ERENSHOR_DIR="/path/to/Erenshor" ./build.sh"
+    exit 0
+fi
+
+if [[ -z "$ERENSHOR_DIR" || ! -d "$ERENSHOR_DIR" ]]; then
+    echo "ERROR: set ERENSHOR_DIR to the Erenshor game directory when INSTALL=1."
+    exit 1
+fi
+if pgrep -f '[E]renshor\.exe' >/dev/null 2>&1; then
+    echo "ERROR: Erenshor is running. Exit the game before replacing the plugin DLL."
+    exit 1
+fi
+
+GAME_ASSEMBLY="$ERENSHOR_DIR/Erenshor_Data/Managed/Assembly-CSharp.dll"
+if [[ "${ALLOW_GAME_ASSEMBLY_MISMATCH:-0}" != "1" ]]; then
+    if [[ ! -s "$GAME_ASSEMBLY" ]]; then
+        echo "ERROR: Could not find the installed game's Assembly-CSharp.dll: $GAME_ASSEMBLY"
+        echo "The installer requires the public game build matching the local references."
+        exit 1
+    fi
+    if ! cmp -s "$LIB_DIR/Assembly-CSharp.dll" "$GAME_ASSEMBLY"; then
+        echo "ERROR: Installed Erenshor Assembly-CSharp.dll differs from this build's pinned public-game reference."
+        echo "This package intentionally does not target the 0.8 community playtest or unknown game builds."
+        echo "Re-check the official public branch before updating the reference assemblies."
+        echo "Set ALLOW_GAME_ASSEMBLY_MISMATCH=1 only if you have independently verified compatibility."
+        exit 1
+    fi
+    echo "✓ Installed game Assembly-CSharp.dll matches the pinned public build reference"
+else
+    echo "WARNING: bypassing the pinned game assembly check by explicit request"
+fi
+
+PLUGINS_DIR="$ERENSHOR_DIR/plugins"
 mkdir -p "$PLUGINS_DIR"
 INSTALL_TARGET="$PLUGINS_DIR/ErenshorClassicSkills.dll"
 INSTALL_TEMP="$PLUGINS_DIR/.ErenshorClassicSkills.dll.tmp.$$"
-if [ -f "$INSTALL_TARGET" ]; then
-    INSTALL_BACKUP="$INSTALL_TARGET.backup-$(date -u +%Y%m%dT%H%M%SZ)"
-    cp -p "$INSTALL_TARGET" "$INSTALL_BACKUP" || {
-        echo "✗ Could not back up the installed DLL"; exit 1;
-    }
-    echo "  ✓ Backup: $INSTALL_BACKUP"
+if [[ -f "$INSTALL_TARGET" ]]; then
+    BACKUP="$INSTALL_TARGET.backup-$(date -u +%Y%m%dT%H%M%SZ)"
+    cp -p "$INSTALL_TARGET" "$BACKUP"
+    echo "✓ Existing plugin backed up to: $BACKUP"
 fi
-cp "$OUTPUT_DLL" "$INSTALL_TEMP" &&
-    mv -f "$INSTALL_TEMP" "$INSTALL_TARGET" &&
-    echo "✓ Installed atomically to $PLUGINS_DIR" || {
-        rm -f "$INSTALL_TEMP"
-        echo "✗ Atomic install failed"
-        exit 1
-    }
-
-echo "✓ Icons and models are embedded in the DLL ($(du -sh "$OUTPUT_DLL" | cut -f1))"
-
-echo ""
-echo "═══════════════════════════════════════════"
-echo "  DONE — Launch Erenshor through Steam"
-echo ""
-echo "  F8  Skills window     /skills  Chat overview"
-echo "  F9  Forage            /smith   Smithing"
-echo "  F10 Bind Wound        /bake    Baking"
-echo "  ;   Beg               /brew    Brewing"
-echo "  Sit Meditate (auto)   /fletch  Fletching"
-echo "                        /jewel   Jewelcraft"
-echo "                        /tailor  Tailoring"
-echo ""
-echo "  SimCraft: /whisper SimName craft 5 Copper Rivets"
-echo "═══════════════════════════════════════════"
+cp "$OUTPUT_DLL" "$INSTALL_TEMP"
+mv -f "$INSTALL_TEMP" "$INSTALL_TARGET"
+echo "✓ Installed native Lunaris plugin to: $INSTALL_TARGET"
+echo "Do not leave a second copy under BepInEx/plugins."

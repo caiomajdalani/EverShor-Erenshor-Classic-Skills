@@ -58,15 +58,6 @@ namespace ErenshorSkills.Monk
 
     internal static class MonkCharacterCreation
     {
-        private const string ButtonName = "CS_MonkClassButton";
-        private const string NecromancerButtonName =
-            "CS_NecromancerClassButton";
-        private static readonly HashSet<string> NativeClassLabels =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "Arcanist", "Windblade", "Druid", "Paladin",
-                "Stormcaller", "Reaver"
-            };
         private static readonly MethodInfo CheckUsedNames = AccessTools.Method(
             typeof(CharSelectManager), "CheckUsedNames");
 
@@ -76,111 +67,9 @@ namespace ErenshorSkills.Monk
                 return;
             MonkCatalog.TryInitialize();
             MonkCatalog.EnsureClass();
-            if (MonkCatalog.MonkClass == null || manager.CharCreate == null)
-                return;
-
-            Button source = manager.CharCreate.GetComponentsInChildren<Button>(true)
-                .FirstOrDefault(button => string.Equals(GetLabel(button),
-                    "Reaver", StringComparison.OrdinalIgnoreCase));
-            if (source == null) return;
-            Transform container = source.transform.parent;
-            Transform existing = container.Find(ButtonName);
-            if (existing != null)
-            {
-                ReflowCustomRow(manager, container,
-                    existing.GetComponent<RectTransform>());
-                return;
-            }
-
-            GameObject clone = UnityEngine.Object.Instantiate(
-                source.gameObject, container, false);
-            clone.name = ButtonName;
-            RectTransform rect = clone.GetComponent<RectTransform>();
-            Button button = clone.GetComponent<Button>();
-            button.onClick = new Button.ButtonClickedEvent();
-            button.onClick.AddListener(() => SelectMonk(manager));
-            TextMeshProUGUI label =
-                clone.GetComponentInChildren<TextMeshProUGUI>(true);
-            if (label != null)
-            {
-                label.text = MonkCatalog.ClassName;
-                label.enableWordWrapping = false;
-                label.enableAutoSizing = true;
-                label.fontSizeMin = 10f;
-                label.fontSizeMax = label.fontSize;
-            }
-            ReflowCustomRow(manager, container, rect);
-            clone.SetActive(true);
-            SkillsPlugin.Log?.LogInfo(
-                "Monk class option added to character creation.");
+            if (MonkCatalog.MonkClass == null) return;
+            ErenshorSkills.Patches.EverShorCharacterCreationPager.Install(manager);
         }
-
-        private static void ReflowCustomRow(CharSelectManager manager,
-            Transform container, RectTransform monk)
-        {
-            if (monk == null) return;
-            List<RectTransform> native = container
-                .GetComponentsInChildren<Button>(true)
-                .Where(button => button.transform.parent == container &&
-                    NativeClassLabels.Contains(GetLabel(button)))
-                .Select(button => button.GetComponent<RectTransform>())
-                .Where(rect => rect != null).ToList();
-            if (native.Count < NativeClassLabels.Count) return;
-
-            float bottom = native.Min(rect => rect.anchoredPosition.y);
-            List<RectTransform> bottomRow = native.Where(rect =>
-                Mathf.Abs(rect.anchoredPosition.y - bottom) <= 4f).ToList();
-            List<float> rows = new List<float>();
-            foreach (float y in native.Select(rect => rect.anchoredPosition.y)
-                .OrderByDescending(value => value))
-                if (rows.All(existing => Mathf.Abs(existing - y) > 4f))
-                    rows.Add(y);
-            float spacing = rows.Count > 1
-                ? rows.Zip(rows.Skip(1), (upper, lower) => upper - lower)
-                    .Average()
-                : monk.rect.height + 2f;
-            spacing = Mathf.Max(monk.rect.height + 1f, spacing);
-            RectTransform necromancer =
-                container.Find(NecromancerButtonName) as RectTransform;
-            if (necromancer != null)
-            {
-                float left = bottomRow.Count >= 2
-                    ? bottomRow.Min(rect => rect.anchoredPosition.x)
-                    : -monk.rect.width * 0.52f;
-                float right = bottomRow.Count >= 2
-                    ? bottomRow.Max(rect => rect.anchoredPosition.x)
-                    : monk.rect.width * 0.52f;
-                float y = necromancer.anchoredPosition.y;
-                float availableWidth = Mathf.Max(80f,
-                    Mathf.Abs(right - left) - 6f);
-                monk.SetSizeWithCurrentAnchors(
-                    RectTransform.Axis.Horizontal,
-                    Mathf.Min(monk.rect.width, availableWidth));
-                necromancer.SetSizeWithCurrentAnchors(
-                    RectTransform.Axis.Horizontal,
-                    Mathf.Min(necromancer.rect.width, availableWidth));
-                necromancer.anchoredPosition = new Vector2(left, y);
-                monk.anchoredPosition = new Vector2(right, y);
-                return;
-            }
-
-            // Necromancer can be disabled independently. In that case Monk owns
-            // the extra row and performs the same one-time panel expansion.
-            float center = bottomRow.Count > 0
-                ? bottomRow.Average(rect => rect.anchoredPosition.x) : 0f;
-            monk.anchoredPosition = new Vector2(center, bottom - spacing);
-            RectTransform details = container as RectTransform;
-            if (details != null)
-                details.sizeDelta += new Vector2(0f, spacing * 1.75f);
-            RectTransform personalizer = manager.Personalizer != null
-                ? manager.Personalizer.GetComponent<RectTransform>() : null;
-            if (personalizer != null && personalizer.parent == container)
-                personalizer.anchoredPosition += Vector2.down * spacing;
-        }
-
-        private static string GetLabel(Button button) =>
-            button?.GetComponentInChildren<TextMeshProUGUI>(true)?.text?
-                .Trim() ?? string.Empty;
 
         internal static void SelectMonk(CharSelectManager manager)
         {

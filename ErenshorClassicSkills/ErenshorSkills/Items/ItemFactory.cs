@@ -5,7 +5,6 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
-using BepInEx;
 using HarmonyLib;
 using UnityEngine;
 
@@ -20,7 +19,7 @@ namespace ErenshorSkills.Items
     ///      closely enough to share their icon (berries, mushrooms, ores,
     ///      rings, etc.). We search the ItemDatabase for visual matches.
     ///   2. EXTERNAL PNG PACK — Users can drop a folder of PNGs into
-    ///      BepInEx/plugins/ClassicSkills/Icons/ named after items.
+    ///      plugins/ClassicSkills/Icons/ named after items.
     ///      Supports community icon packs (e.g. the "Pixel Fantasy RPG
     ///      Icons" free pack from itch.io, or REXARD's Unity Asset Store
     ///      pack which has fishing, herbs, jewelry, armor, food icons).
@@ -1855,10 +1854,9 @@ namespace ErenshorSkills.Items
             RegisterSimpleItem("Adventurer's Backpack",
                 "Right-click to open. 10 item slots. Sturdy and spacious.", 80, "crafting");
             RegisterSimpleItem(BagSystem.ThrallBagName,
-                "A four-slot necromantic armory. Weapons and shields placed " +
-                "inside are visibly equipped by your Bone Thrall. Use one " +
-                "two-handed weapon or bow, or one one-handed weapon with a " +
-                "shield or offhand-compatible weapon.",
+                "A Bone Thrall equipment sheet with one slot for every gear " +
+                "type, including Aura and Charm. It accepts equipment regardless " +
+                "of class restrictions and applies each piece's stats.",
                 0, "crafting");
             RegisterSimpleItem(BagSystem.CorpseBagName,
                 "Recovered belongings. Items can only be removed; the bag disappears when empty.",

@@ -2,7 +2,6 @@ using System;
 using System.IO;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
-using BepInEx;
 using UnityEngine;
 
 namespace ErenshorSkills
@@ -649,7 +648,7 @@ namespace ErenshorSkills
 
         public static void Send(string message)
         {
-            // Test-mode chat is mirrored to BepInEx so automated in-game runs
+            // Test-mode chat is mirrored to the Lunaris log so automated in-game runs
             // retain durable evidence even when the player's chat filters hide
             // SystemMessages. Normal gameplay logging remains unchanged.
             MirrorTestMessage("Chat", message);

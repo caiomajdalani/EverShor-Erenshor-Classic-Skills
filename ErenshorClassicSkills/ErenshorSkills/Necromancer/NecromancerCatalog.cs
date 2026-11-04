@@ -232,6 +232,10 @@ namespace ErenshorSkills.Necromancer
             spell.Aggro = definition.Aggro;
             spell.TargetDamage = definition.TargetDamage;
             spell.Cooldown = definition.CooldownSeconds;
+            spell.AutomateAttack = !definition.HiddenEffect &&
+                (definition.Type == Spell.SpellType.Damage ||
+                 definition.Type == Spell.SpellType.StatusEffect ||
+                 definition.Type == Spell.SpellType.PBAE);
             spell.HP = definition.Hp;
             spell.AC = definition.Ac;
             spell.Str = definition.Str;
@@ -259,7 +263,8 @@ namespace ErenshorSkills.Necromancer
                 definition.Pbaoe;
             spell.NoResonate = definition.Kind != NecromancerSpellKind.Native ||
                 definition.Type == Spell.SpellType.Pet;
-            spell.SimUsable = !definition.HiddenEffect;
+            spell.SimUsable = !definition.HiddenEffect &&
+                definition.SimUsable;
             spell.color = definition.VfxColor;
             spell.StatusEffectMessageOnPlayer = PlayerEffectMessage(definition);
             spell.StatusEffectMessageOnNPC = NpcEffectMessage(definition);
@@ -780,6 +785,7 @@ namespace ErenshorSkills.Necromancer
         {
             NecromancerRuntime.ResetCharacterState();
             NecromancerPetEquipment.ResetRuntime();
+            NecromancerThrallAbilities.Reset();
         }
 
         internal static bool ValidateCatalog(out string detail)

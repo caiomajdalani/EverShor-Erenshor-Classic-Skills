@@ -3398,7 +3398,7 @@ namespace ErenshorSkills.Testing
             // called from Stats.Update it also aborts the rest of Update —
             // including regen — for that character every 3 seconds.
             //
-            // Rethrowing only adds a Unity-side stack trace that BepInEx
+            // Rethrowing only adds an additional Unity-side stack trace
             // writes to disk synchronously, once per affected character per
             // tick. Log the full detail once per Stats instance and swallow
             // the repeats so the remainder of Stats.Update still runs.

@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text;
 using HarmonyLib;
 using UnityEngine;
 
@@ -1807,6 +1809,7 @@ namespace ErenshorSkills.Patches
             catch { }
         }
 
+
         /// <summary>
         /// Weapon proficiency belongs beside Erenshor's native Base DPS line,
         /// not inside item lore. Keeping generated stats out of Lore prevents
@@ -2423,6 +2426,8 @@ namespace ErenshorSkills.Patches
             if (trivialLevel <= 160) return 6000;
             return 10000; // 161-180 endgame
         }
+
+        internal static void ShowSkillOverviewFromLunaris() => ShowSkillOverview();
 
         private static void ShowSkillOverview()
         {

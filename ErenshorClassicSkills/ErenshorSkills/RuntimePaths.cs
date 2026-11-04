@@ -3,17 +3,14 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using BepInEx;
 using UnityEngine;
 
 namespace ErenshorSkills
 {
     /// <summary>
-    /// Resolves addon paths without assuming a specific loader layout.
-    /// BepInEx normally uses BepInEx/plugins + BepInEx/config, while Lunaris
-    /// uses plugins + plugins/config and remaps Assembly.Location back to the
-    /// original plugin file. Durable character data follows an existing
-    /// ClassicSkills data directory when switching between those loaders.
+    /// Resolves paths for native Lunaris installation. Durable character data
+    /// remains in the existing plugins/config/ClassicSkills directory; legacy
+    /// BepInEx save locations are still detected to avoid losing existing data.
     /// </summary>
     internal static class RuntimePaths
     {
@@ -34,7 +31,7 @@ namespace ErenshorSkills
             }
         }
 
-        internal static string LoaderName => IsLunaris ? "Lunaris" : "BepInEx";
+        internal static string LoaderName => "Lunaris (native API)";
 
         internal static string PluginDirectory
         {
@@ -42,46 +39,19 @@ namespace ErenshorSkills
             {
                 if (!string.IsNullOrEmpty(_pluginDirectory)) return _pluginDirectory;
 
-                // Lunaris remaps the hot-reload cache assembly location back to
-                // the manually installed source DLL, making this the most
-                // reliable loader-neutral location.
+                // Lunaris documents <Erenshor>/plugins as the native plugin
+                // directory. Use that canonical path instead of Assembly.Location,
+                // which may point at a collectible hot-reload load context.
                 try
                 {
-                    string assemblyLocation = Assembly.GetExecutingAssembly().Location;
-                    if (!string.IsNullOrWhiteSpace(assemblyLocation))
-                    {
-                        string full = Path.GetFullPath(assemblyLocation);
-                        string directory = File.Exists(full)
-                            ? Path.GetDirectoryName(full)
-                            : (Directory.Exists(full) ? full : Path.GetDirectoryName(full));
-                        if (!string.IsNullOrEmpty(directory))
-                            return _pluginDirectory = directory;
-                    }
+                    string plugins = Path.Combine(GameRoot, "plugins");
+                    Directory.CreateDirectory(plugins);
+                    return _pluginDirectory = plugins;
                 }
-                catch { }
-
-                try
+                catch
                 {
-                    string infoLocation = SkillsPlugin.Instance?.Info?.Location;
-                    if (!string.IsNullOrWhiteSpace(infoLocation))
-                    {
-                        string full = Path.GetFullPath(infoLocation);
-                        string directory = Directory.Exists(full)
-                            ? full : Path.GetDirectoryName(full);
-                        if (!string.IsNullOrEmpty(directory))
-                            return _pluginDirectory = directory;
-                    }
+                    return _pluginDirectory = GameRoot;
                 }
-                catch { }
-
-                try
-                {
-                    if (!string.IsNullOrWhiteSpace(Paths.PluginPath))
-                        return _pluginDirectory = Path.GetFullPath(Paths.PluginPath);
-                }
-                catch { }
-
-                return _pluginDirectory = GameRoot;
             }
         }
 
@@ -91,17 +61,8 @@ namespace ErenshorSkills
             {
                 if (!string.IsNullOrEmpty(_configRoot)) return _configRoot;
 
-                string current = null;
-                try
-                {
-                    if (!string.IsNullOrWhiteSpace(Paths.ConfigPath))
-                        current = Path.GetFullPath(Paths.ConfigPath);
-                }
-                catch { }
-                if (string.IsNullOrEmpty(current))
-                    current = Path.Combine(GameRoot, IsLunaris
-                        ? Path.Combine("plugins", "config")
-                        : Path.Combine("BepInEx", "config"));
+                string current = Path.GetFullPath(
+                    Path.Combine(GameRoot, "plugins", "config"));
 
                 var candidates = new List<string>
                 {
@@ -127,6 +88,12 @@ namespace ErenshorSkills
 
         internal static string DataDirectory =>
             Path.Combine(ConfigRoot, "ClassicSkills");
+
+        internal static void Reset()
+        {
+            _pluginDirectory = null;
+            _configRoot = null;
+        }
 
         internal static string AssetDirectory =>
             Path.Combine(PluginDirectory, "ClassicSkills");

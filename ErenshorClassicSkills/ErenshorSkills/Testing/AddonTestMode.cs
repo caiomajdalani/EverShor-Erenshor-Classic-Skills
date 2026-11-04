@@ -5,7 +5,6 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
-using BepInEx;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -6721,7 +6720,7 @@ namespace ErenshorSkills.Testing
         private static void RunFeatureChecks(SmokeReport report)
         {
             bool runtimePathsValid = RuntimePaths.Validate(out string runtimePathDetail);
-            report.Check("FEATURE", "BepInEx and Lunaris runtime paths",
+            report.Check("FEATURE", "Native Lunaris runtime paths",
                 runtimePathsValid, runtimePathDetail);
             report.Check("FEATURE", "Harmony patch classes",
                 SkillsPlugin.AppliedPatchClassCount == SkillsPlugin.ExpectedPatchClassCount &&
