@@ -73,10 +73,25 @@ namespace ErenshorSkills.Monk
                     out MonkTechniqueDefinition definition))
                 return true;
             Stats stats = user?.GetComponent<Stats>();
-            if (stats == null || !MonkCatalog.IsMonkClass(stats.CharacterClass))
+            Character actor = user != null ? user.GetComponent<Character>() : null;
+            if (SkillsPlugin.CfgEnableMonk?.Value != true || stats == null ||
+                !MonkCatalog.IsMonkClass(stats.CharacterClass))
             {
-                ChatHelper.SendCombat(
+                if (actor != null && !actor.isNPC) ChatHelper.SendCombat(
                     "Only a Monk can use that technique.", "#E7C76F");
+                result = false;
+                return false;
+            }
+            float reach = definition.Kind == MonkTechniqueKind.StoneThrow ? 18f : 5f;
+            bool npcTargetMatches = actor?.MyNPC != null &&
+                actor.MyNPC.CurrentAggroTarget == target;
+            if (!MonkCombatPolicy.CanActivate(actor != null && actor.Alive,
+                actor != null && actor.isNPC, definition.IsOffensive,
+                target != null && target.Alive, target == actor,
+                npcTargetMatches, target != null && actor != null
+                    ? (target.transform.position - actor.transform.position).sqrMagnitude
+                    : float.PositiveInfinity, reach))
+            {
                 result = false;
                 return false;
             }
@@ -102,7 +117,7 @@ namespace ErenshorSkills.Monk
                 // Utility techniques complete entirely inside this prefix and
                 // therefore never receive a SkillUseState in the postfix.
                 if (result && IsRestorativeTechnique(definition.Kind) &&
-                    MonkCatalog.IsMonkPlayer())
+                    actor == GameData.PlayerControl?.Myself)
                     AwardAlterationUse(definition);
                 return false;
             }
@@ -143,6 +158,12 @@ namespace ErenshorSkills.Monk
                     out MonkTechniqueDefinition definition))
                 return true;
             Character character = caster?.MyChar;
+            if (character == null || SkillsPlugin.CfgEnableMonk?.Value != true ||
+                !MonkCatalog.IsMonkClass(character.MyStats?.CharacterClass))
+            {
+                result = false;
+                return false;
+            }
             UseSkill skillUser = character?.MySkills;
             Skill backingSkill = MonkCatalog.GetSkill(definition.Key);
             if (character == null || skillUser == null ||
@@ -168,16 +189,20 @@ namespace ErenshorSkills.Monk
 
             Character target = definition.IsOffensive
                 ? requestedTarget?.Myself ??
-                  GameData.PlayerControl?.CurrentTarget
+                  (character.isNPC ? character.MyNPC?.CurrentAggroTarget
+                    : GameData.PlayerControl?.CurrentTarget)
                 : character;
-            result = skillUser.DoSkill(backingSkill, target);
+            result = character.isNPC
+                ? skillUser.DoSkillNoChecks(backingSkill, target)
+                : skillUser.DoSkill(backingSkill, target);
             if (SkillsPlugin.CfgEnableTestMode?.Value == true)
                 SkillsPlugin.Log?.LogInfo(
                     $"[Monk Technique] {definition.Key} result={result}");
             if (result)
             {
                 stats.ReduceMana(manaCost);
-                ApplySpellCooldown(spell);
+                if (character == GameData.PlayerControl?.Myself)
+                    ApplySpellCooldown(spell);
                 // Impact VFX is anchored here, on the same call that spends
                 // the mana, rather than deep inside the animation driver whose
                 // impact-release step proved unreliable in play. The driver is
@@ -225,7 +250,8 @@ namespace ErenshorSkills.Monk
             // One award per successful offensive technique, mirroring the one
             // award per weapon swing the native melee path gives. Utility
             // techniques carry Power 0 and train nothing.
-            if (state.Definition.Power > 0 && MonkCatalog.IsMonkPlayer())
+            if (state.Definition.Power > 0 &&
+                state.CasterCharacter == GameData.PlayerControl?.Myself)
                 Skills.CombatSkills.OnTechniqueHit(
                     Skills.CombatSkills.WeaponType.HandToHand,
                     state.Definition.Power *
@@ -1192,9 +1218,15 @@ namespace ErenshorSkills.Monk
         }
     }
 
-    [HarmonyPatch(typeof(UseSkill), nameof(UseSkill.DoSkill))]
+    [HarmonyPatch]
     internal static class Patch_MonkUseSkill
     {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            yield return AccessTools.Method(typeof(UseSkill), nameof(UseSkill.DoSkill));
+            yield return AccessTools.Method(typeof(UseSkill), nameof(UseSkill.DoSkillNoChecks));
+        }
+
         private static bool Prefix(UseSkill __instance, Skill _skill,
             Character _target, ref bool __result,
             out MonkRuntime.SkillUseState __state) =>

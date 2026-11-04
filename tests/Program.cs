@@ -1,5 +1,6 @@
 using System;
 using ErenshorSkills.Necromancer;
+using ErenshorSkills.Monk;
 
 internal static class Program
 {
@@ -25,6 +26,17 @@ internal static class Program
         Check("infinite distance", !ThrallCombatPolicy.CanAreaTaunt(true, false, false, true, float.PositiveInfinity));
         Check("direct taunt within requested 1-2 seconds", ThrallCombatPolicy.DirectTauntCooldown >= 1 && ThrallCombatPolicy.DirectTauntCooldown <= 2);
         Check("area taunt every two seconds", ThrallCombatPolicy.AreaTauntCooldown == 2);
+        Check("Monk player melee at reach", MonkCombatPolicy.CanActivate(true, false, true, true, false, false, 25, 5));
+        Check("dead Monk cannot attack", !MonkCombatPolicy.CanActivate(false, false, true, true, false, true, 1, 5));
+        Check("Monk cannot attack self", !MonkCombatPolicy.CanActivate(true, false, true, true, true, true, 0, 5));
+        Check("Monk cannot attack dead target", !MonkCombatPolicy.CanActivate(true, false, true, false, false, true, 1, 5));
+        Check("Sim Monk requires own aggro target", !MonkCombatPolicy.CanActivate(true, true, true, true, false, false, 1, 5));
+        Check("Sim Monk accepts own aggro target", MonkCombatPolicy.CanActivate(true, true, true, true, false, true, 1, 5));
+        Check("Sim cannot mutate player utility timers", !MonkCombatPolicy.CanActivate(true, true, false, true, true, false, 0, 5));
+        Check("player utility remains allowed", MonkCombatPolicy.CanActivate(true, false, false, true, true, false, 0, 5));
+        Check("melee cannot hit from ranged distance", !MonkCombatPolicy.CanActivate(true, true, true, true, false, true, 100, 5));
+        Check("stone throw remains ranged", MonkCombatPolicy.CanActivate(true, true, true, true, false, true, 100, 18));
+        Check("invalid Monk distance rejected", !MonkCombatPolicy.CanActivate(true, true, true, true, false, true, float.NaN, 5));
         Console.WriteLine(passed + " regression checks passed.");
         return 0;
     }

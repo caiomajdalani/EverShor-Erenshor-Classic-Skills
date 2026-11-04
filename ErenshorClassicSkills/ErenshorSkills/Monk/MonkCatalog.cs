@@ -777,21 +777,24 @@ namespace ErenshorSkills.Monk
 
         public static bool IsMonkPlayer()
         {
-            return IsMonkClass(GameData.PlayerStats?.CharacterClass) ||
-                string.Equals(GameData.CurrentCharacterSlot?.CharClass,
+            Class activeClass = GameData.PlayerStats?.CharacterClass;
+            if (activeClass != null) return IsMonkClass(activeClass);
+            return string.Equals(GameData.CurrentCharacterSlot?.CharClass,
                     ClassName, StringComparison.OrdinalIgnoreCase);
         }
 
         internal static bool TryGetDefinition(Skill skill,
             out MonkTechniqueDefinition definition)
         {
-            return Definitions.TryGetValue(skill, out definition);
+            definition = null;
+            return skill != null && Definitions.TryGetValue(skill, out definition);
         }
 
         internal static bool TryGetDefinition(Spell spell,
             out MonkTechniqueDefinition definition)
         {
-            return SpellDefinitions.TryGetValue(spell, out definition);
+            definition = null;
+            return spell != null && SpellDefinitions.TryGetValue(spell, out definition);
         }
 
         internal static MonkTechniqueDefinition GetDefinition(string key)

@@ -12,7 +12,7 @@ namespace ErenshorSkills
     {
         public const string PluginGuid = "com.erenshor.classicskills";
         public const string PluginName = "EverShor - Classic Skills, Classes and Features";
-        public const string PluginVersion = "1.9.0";
+        public const string PluginVersion = "1.9.1";
 
         internal static ModLogger Log;
         private IConfigHandle<ClassicSkillsSettings> _settingsHandle;

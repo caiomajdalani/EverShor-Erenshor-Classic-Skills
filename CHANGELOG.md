@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.9.1 — local Monk correction candidate (2026-11-04)
+
+- Make the live player class authoritative over stale saved-slot class labels.
+- Make Monk skill/spell lookups null-safe and reject use by other classes or while Monk is disabled.
+- Validate caster/target life, self-targeting, reach and Sim ownership of the current aggro target.
+- Route Sim spellbook techniques through the NPC skill path; never fall back to the player's selected target or alter the player's hotkey cooldowns.
+- Apply the Monk validation/animation hooks to DoSkillNoChecks as well as DoSkill. Block Sim utility techniques that use local-player stance timers.
+- Restrict technique training credit to the actual local caster. Add 11 Monk combat-policy regressions (23 total).
+- This is an unverified-in-game candidate. Sim approach/positioning and the exact cause of the reported Necromancer spellbook contamination remain pending reproduction; no saved learned-ability data is deleted.
+
+
 ## 1.9.0 — proposed, unreleased (2026-11-04)
 
 Based on upstream tag 1.8.4, commit `ff821f1d2cfce194f792c68749e6dd51491eb5ea`. Consolidates local 1.9.0 work and subsequent locally labeled 1.9.1 changes. Local build labels are not official upstream releases.
