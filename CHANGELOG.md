@@ -7,6 +7,7 @@ Based on upstream tag 1.8.4, commit `ff821f1d2cfce194f792c68749e6dd51491eb5ea`. 
 ### Native Lunaris
 
 - Replace the BepInEx base/config/logger with Lunaris registration and compatibility adapters; explicitly request Harmony permission.
+- Use the full EverShor project branding as the plugin display name while retaining the existing plugin GUID and author credit.
 - Expose native Skills and Extra Settings commands. Preserve legacy JSON data discovery; loader option values are not imported.
 - Save data/options, stop coroutines, detach scene callbacks, unpatch Harmony, release UI and clear references during unload.
 - Add configurable local reference paths and a PowerShell build entry point; do not distribute game/runtime dependencies.

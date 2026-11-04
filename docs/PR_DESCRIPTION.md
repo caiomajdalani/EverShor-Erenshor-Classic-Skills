@@ -2,7 +2,7 @@
 
 Base: `krautchanpro/EverShor-Erenshor-Classic-Skills:main`, tag 1.8.4 / ff821f1d2cfce194f792c68749e6dd51491eb5ea.
 
-This contribution ports Classic Skills to native Lunaris and consolidates locally developed character-selection and Necromancer/Thrall improvements. Original plugin name, GUID, author attribution and license/asset notices are preserved.
+This contribution ports Classic Skills to native Lunaris and consolidates locally developed character-selection and Necromancer/Thrall improvements. The plugin GUID, original author attribution and license/asset notices are preserved. The display name uses the project branding, EverShor - Classic Skills, Classes and Features, instead of the shorter 1.8.4 plugin label.
 
 Users migrate from a BepInEx entry point to Lunaris Options and commands. Monk/Necromancer appear on their own class-selection page instead of expanding the native class grid. Thralls receive slot-validated equipment, gear-derived combat values and a private tier-based ability kit; they no longer inherit the player's learned spellbook. Optional Fate of the Fallen page support stays behind reflection.
 

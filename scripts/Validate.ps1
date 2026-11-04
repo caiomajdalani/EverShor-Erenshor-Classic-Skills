@@ -53,6 +53,24 @@ if (@($hashes | Group-Object | Where-Object Count -GT 1).Count) {
 }
 Write-Host "PASS icon catalogs, PNG headers and uniqueness ($($hashes.Count) icons)"
 
+$documents = @((Join-Path $root 'README.md'), (Join-Path $root 'CHANGELOG.md'),
+    (Join-Path $mod 'README.md')) + @(Get-ChildItem (Join-Path $root 'docs') -Filter *.md -File |
+        Select-Object -ExpandProperty FullName)
+$links = 0
+foreach ($document in $documents) {
+    $text = Get-Content -LiteralPath $document -Raw
+    foreach ($match in [regex]::Matches($text, '\[[^\]]+\]\(([^\s)]+)\)')) {
+        $target = $match.Groups[1].Value
+        if ($target -match '^(https?:|mailto:|#)') { continue }
+        $target = [Uri]::UnescapeDataString(($target -split '#', 2)[0])
+        if (!(Test-Path -LiteralPath (Join-Path (Split-Path $document) $target))) {
+            throw "Broken local documentation link: $document -> $target"
+        }
+        $links++
+    }
+}
+Write-Host "PASS local documentation links ($links paths; anchors not checked)"
+
 & $DotnetPath run --project (Join-Path $root 'tests/CombatPolicy.Tests.csproj') -c Release
 if ($LASTEXITCODE -ne 0) { throw 'Combat policy regression tests failed.' }
 if (!$SkipBuild) {

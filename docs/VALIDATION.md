@@ -8,11 +8,13 @@ Baseline: upstream 1.8.4 / `ff821f1d2cfce194f792c68749e6dd51491eb5ea`. Candidate
 |---|---|---|
 | Release / Debug builds | PASS, zero errors | .NET SDK 8.0.427, supplied assembly hashes |
 | Compiler warnings | 2 MSB3277 warnings per build | Lunaris System.Net.Http/System.IO.Compression versions; see BUILDING.md |
+| Documentation links | PASS, 11 paths | local paths in maintained READMEs/docs; anchors not checked |
 | Version agreement | PASS | project, plugin constant and manifest all 1.9.0 |
 | Native loader source scan | PASS | legacy API declarations/references absent; migration data-path strings allowed |
 | Icon validation | PASS | 644 PNG headers, required class catalog counts, no exact duplicate hashes |
 | Combat policy regressions | PASS, 12 cases | actual production file linked into dependency-free runner |
 | Literal Harmony target audit | PASS, 86 targets | typeof + string method-name attributes resolve in supplied assemblies |
+| Clean source archive | PASS | source-only checks pass after extraction with no lib/bin/obj inputs |
 | Bash script | NOT RUN | No Bash executable available locally; use the validated PowerShell entry point |
 
 The target audit does not resolve every overload, nameof-based annotation, optional reflection bridge or patch order. PNG header/hash checks do not prove rendering quality. No performance timing or profiler session was performed: allocation reductions are established by source inspection, not a measured FPS claim.
