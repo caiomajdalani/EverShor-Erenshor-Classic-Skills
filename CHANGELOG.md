@@ -50,7 +50,8 @@ Based on upstream tag 1.8.4, commit `ff821f1d2cfce194f792c68749e6dd51491eb5ea`. 
 - Replace the chat-color fallback chain with explicit delegates for all 23 settings.
 - Stop tracking upstream-generated bin/obj outputs and third-party lib references; keep local dependencies ignored.
 - Add metadata/source/icon checks, 12 game-independent regression cases, CI, reference hashes and a manual game-test matrix.
-- Refresh READMEs, migration audit and PR instructions. Exclude standalone Compare/Diagnostics, private saves, SDK caches and cancelled class design.
+- Restore the main README as a comprehensive player guide: all 25 skills, crafting, SimCraft, economy, bags, corpse recovery, custom class progressions, equipment, trainers and commands. Verify 35 Necromancer spells, 32 Monk techniques, shared skill lists and eight Ascensions per class against source; keep developer/test instructions separate.
+- Refresh migration audit and PR instructions. Exclude standalone Compare/Diagnostics, private saves, SDK caches and cancelled class design.
 
 ### Validation
 

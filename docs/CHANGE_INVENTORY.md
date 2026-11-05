@@ -94,3 +94,4 @@ Baseline: ff821f1d2cfce194f792c68749e6dd51491eb5ea. Every changed/added/removed 
 | `tests/CombatPolicy.Tests.csproj` | Native loader build references, configurable local inputs and build entry points |
 | `tests/Program.cs` | Automated regression, metadata/assets/target checks and reference-free CI |
 | `.gitattributes` | Normalize script/source line endings for reproducible checkouts |
+| `docs/IN_GAME_TESTING.md` | Preserve optional QA commands outside the player-facing gameplay overview |
