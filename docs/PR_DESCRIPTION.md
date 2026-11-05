@@ -1,17 +1,25 @@
-# Proposed 1.9.0: native Lunaris migration, class UI and Thrall equipment/combat
+# 1.9.1: isolate Monk combat state and restore the complete gameplay README
 
-Base: `krautchanpro/EverShor-Erenshor-Classic-Skills:main`, tag 1.8.4 / ff821f1d2cfce194f792c68749e6dd51491eb5ea.
+Follow-up to merged PR #1. Base: upstream main at 28516e6, containing the native Lunaris 1.9.0 migration. Plugin, project and manifest now consistently identify version 1.9.1.
 
-This contribution ports Classic Skills to native Lunaris and consolidates locally developed character-selection and Necromancer/Thrall improvements. The plugin GUID, original author attribution and license/asset notices are preserved. The display name uses the project branding, EverShor - Classic Skills, Classes and Features, instead of the shorter 1.8.4 plugin label.
+Community reports described buggy Monk punches and approach, unexpected auto-attack during interactions, and a Necromancer apparently using Resonant Palm. This change addresses concrete isolation and execution-path problems found during source review; it does not claim every reported symptom has been reproduced or resolved.
 
-Users migrate from a BepInEx entry point to Lunaris Options and commands. Monk/Necromancer appear on their own class-selection page instead of expanding the native class grid. Thralls receive slot-validated equipment, gear-derived combat values and a private tier-based ability kit; they no longer inherit the player's learned spellbook. Optional Fate of the Fallen page support stays behind reflection.
+## Monk corrections
 
-Cleanup removes unused layout code, repeated ability-membership scans and routine taunt-query allocations, releases spell/UI caches on reset/unload and replaces the chat-color fallback chain with explicit settings delegates. The periodic-effect guard now propagates unrelated exceptions instead of hiding errors globally. Previously tracked bin/obj outputs and third-party lib references are removed from the source tree and ignored for local development.
+- Make the live player class authoritative over stale saved-slot labels. Reject custom techniques for non-Monk actors and while Monk is disabled; handle null catalog lookup safely.
+- Resolve Sim targets from that Sim's own NPC aggro state, never from the player's selected target. Route Sim casts through the NPC skill path.
+- Apply validation/animation hooks to both DoSkill and DoSkillNoChecks, the execution path used by NPCs.
+- Check caster/target life, self-targeting, reach and Sim aggro-target ownership. Prevent Sim utility techniques from sharing the player's stance timers.
+- Only the actual local player caster updates player hotkey cooldowns and receives technique-training credit. Existing saved ability lists are not deleted.
 
-This is a gameplay change as well as a migration: direct taunt is 1.25 s, area taunt is 2 s/12 m, attacks are 6 s, slow 11 s and stun 15 s. Please review the balance independently of the loader fixes. Changes are inventoried in `docs/CHANGE_INVENTORY.md` and the root changelog.
+## Complete player guide
 
-Validation: Release and Debug builds pass with zero errors and two documented MSB3277 reference-version warnings. Twelve production-policy regressions pass; metadata and 644 icon checks pass; 86 literal Harmony target names resolve. The Bash script was not run because no Bash executable is available locally. CI runs reference-free checks because game/runtime DLLs are local dependencies.
+Restore the README as a gameplay/mod guide covering 25 skills, training, crafting, SimCraft, economy, bags, corpse recovery, trainers, class progressions, Thrall equipment, commands and settings. Verify the lists of 35 Necromancer spells, 32 Monk techniques, shared native skills and eight Ascensions per class against source. Move optional QA commands into a separate reference and retain original branding/credits.
 
-**Game runtime tests have not been performed in this audit.** `docs/VALIDATION.md` lists the required save-migration, UI, control/immunity, balance, inventory persistence, cross-mod and shutdown scenarios. The managed exception guard is not a claim to fix every Unity crash. Loader options are not auto-imported; users should back up saves and review Options. The existing upstream root/nested license distinction is preserved for maintainer clarification.
+## Validation and remaining work
 
-Not included: Item Compare, Diagnostics, game/runtime binaries, private saves, SDK caches or the cancelled Death Knight concept. Nothing has been published to the upstream repository by this preparation.
+Local Release/Debug builds pass with zero errors and two existing MSB3277 dependency-version warnings. Twenty-three linked production-policy regression cases, version agreement, 644 icon checks, 86 literal Harmony target names and maintained documentation links are checked by the scripts. Source-only validation is also run against the source archive without game dependencies.
+
+Community testing is ongoing and has reported partial improvements. A complete reproducible in-game matrix is not claimed. Sim approach/positioning, animation quality across rigs and the precise origin of reported cross-class spellbook contamination remain pending reproduction. The existing runtime mitigation does not establish that all Unity crashes are fixed.
+
+This PR advances the version to 1.9.1 so the current corrections can be reviewed together. Further fixes should be delivered as new versioned releases. No game/runtime DLLs, private saves, diagnostics binaries or inspection-tool/decompiled game sources are included.

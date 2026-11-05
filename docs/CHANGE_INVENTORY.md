@@ -95,3 +95,15 @@ Baseline: ff821f1d2cfce194f792c68749e6dd51491eb5ea. Every changed/added/removed 
 | `tests/Program.cs` | Automated regression, metadata/assets/target checks and reference-free CI |
 | `.gitattributes` | Normalize script/source line endings for reproducible checkouts |
 | `docs/IN_GAME_TESTING.md` | Preserve optional QA commands outside the player-facing gameplay overview |
+
+## 1.9.1 follow-up to merged upstream PR #1
+
+| Path | Change |
+|---|---|
+| `ErenshorClassicSkills/ErenshorSkills/Monk/MonkCatalog.cs` | Null-safe lookup and authoritative live player class |
+| `ErenshorClassicSkills/ErenshorSkills/Monk/MonkRuntime.cs` | Actor/target isolation, NPC dispatch and both skill-path hooks |
+| `ErenshorClassicSkills/ErenshorSkills/Monk/MonkCombatPolicy.cs` | Pure activation eligibility policy |
+| `tests/Program.cs`, `tests/CombatPolicy.Tests.csproj` | Eleven additional Monk regressions linked to production policy |
+| `ErenshorClassicSkills/ErenshorSkills/Plugin.cs`, project and manifest | Consistent version 1.9.1 |
+| `ErenshorClassicSkills/ErenshorClassicSkills-v1.9.1-Changes.md` | Follow-up release notes and unresolved runtime scenarios |
+| README, changelog and review/validation documents | Full gameplay guide plus current 1.9.1 review scope |

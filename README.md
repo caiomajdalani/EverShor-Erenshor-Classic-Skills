@@ -19,6 +19,7 @@ The mod contains **25 trainable skills**: seven utility/gathering skills, eight 
 - [Commands](#chat-commands)
 - [Keybinds](#default-keybinds)
 - [Configuration](#configuration)
+- [What changed in 1.9.1](#what-changed-in-191)
 - [What changed in 1.9.0](#what-changed-in-190)
 
 ## Installation
@@ -717,6 +718,18 @@ The integrated **Attack Sync Fix** adjusts hit timing to match attack animations
 
 **Item Compare is a separate mod.** It is not part of this Classic Skills DLL. The spell-cast Diagnostics plugin is also a separate troubleshooting tool, not a gameplay feature required by Classic Skills.
 
+## What changed in 1.9.1
+
+This release builds on 1.9.0, already merged upstream, and includes the Monk corrections currently under community testing.
+
+- The active character class takes priority over stale saved-slot labels, and non-Monk actors cannot execute custom Monk techniques.
+- Sim Monks use their own combat targets and the NPC skill path. Their casts do not modify player hotkey cooldowns or award technique training to a different character.
+- The mod now validates and animates both native skill execution paths, including the no-check path used by NPCs. Offensive techniques check caster/target life, reach and the Sim's current aggro target.
+- Sim utility techniques that rely on the player's stance timers are excluded, and null skill/spell lookups are handled safely.
+- This full gameplay guide restores the skill, class, crafting, SimCraft and economy explanations and updates the progressions against source.
+
+Some improvements have been reported by community testers. Sim approach/positioning, animation compatibility and the exact origin of cross-class spellbook contamination remain under investigation. See [1.9.1 release notes](ErenshorClassicSkills/ErenshorClassicSkills-v1.9.1-Changes.md). Additional fixes will receive subsequent versions.
+
 ## What changed in 1.9.0
 
 - **Native Lunaris support:** settings are adjusted in Lunaris Options, with native commands for the skill overview and Extra Settings. Old JSON data discovery is retained for migration.
@@ -724,7 +737,7 @@ The integrated **Attack Sync Fix** adjusts hit timing to match attack animations
 - **Expanded Thrall equipment:** character-style slots, Aura/Charm support, gear-derived attributes, weapon damage and guarded equipment visuals.
 - **Thrall-owned combat:** tier attacks, equipment abilities/procs and rapid direct/area taunts replace copying the player's spellbook. Slow and stun add control as the summon advances.
 - **Necromancer spell fixes:** Venomous Blood receives corrected icon handling, and offensive spells use native auto-attack activation.
-- **Monk compatibility:** player attack-sync opt-out applies to handwraps. Grandmaster's Presence can also be used by Reaver. Further Monk actor-isolation fixes are developed separately and are not silently included in the 1.9.0 PR.
+- **Monk compatibility:** player attack-sync opt-out applies to handwraps. Grandmaster's Presence can also be used by Reaver. Version 1.9.1 adds the actor-isolation corrections described above.
 - **Cleanup and stability work:** release owned UI/spell resources, reduce repeated area-taunt allocations, simplify chat-color bindings and restrict the periodic-effect exception mitigation to custom Thralls.
 
 These are implemented systems with ongoing runtime validation, not a promise that every UI combination, Sim animation or Unity crash is resolved. See [known issues and validation](docs/VALIDATION.md) and the [changelog](CHANGELOG.md) for the exact review scope.
