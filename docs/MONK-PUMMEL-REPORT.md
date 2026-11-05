@@ -16,7 +16,7 @@ The previous routine already passed the real caster into Character.DamageMe, but
 - Queued punches stop after a target switch, death, moving outside melee reach or disabling Monk.
 - Damage values, ability learning and Pummel's cooldown are not retuned. No learned-ability save data is deleted.
 
-Six added production-policy regressions cover caster class, independent Sim eligibility and queue cancellation; 29 policy regressions pass in total. Source/reference/icon/link checks and Release compilation pass with the existing two MSB3277 warnings. Runtime reproduction with the reporting player remains pending.
+Six added production-policy regressions cover caster class, independent Sim eligibility and queue cancellation; 33 policy regressions pass in total after adding four preview-2 Resonant Palm auto-engage checks. Source/reference/icon/link checks and Release compilation pass with the existing two MSB3277 warnings. Runtime reproduction with the reporting player remains pending.
 
 ## Tester check
 

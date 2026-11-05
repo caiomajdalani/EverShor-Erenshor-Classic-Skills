@@ -720,7 +720,7 @@ The integrated **Attack Sync Fix** adjusts hit timing to match attack animations
 
 ## Local 1.9.2 preview: Pummel messages
 
-A nearby Sim Monk can produce Pummel follow-up hits even if your character has never learned Pummel. The 1.9.2 preview identifies the real caster in the combat log and isolates follow-up eligibility from the local player class. See the [report and tester check](docs/MONK-PUMMEL-REPORT.md). This preview is evaluated separately from the 1.9.1 PR.
+A nearby Sim Monk can produce Pummel follow-up hits even if your character has never learned Pummel. The 1.9.2 preview identifies the real caster in the combat log and isolates follow-up eligibility from the local player class. See the [report and tester check](docs/MONK-PUMMEL-REPORT.md). Preview 2 also fixes a Sim Resonant Palm cast enabling the player's auto-attack: only the local caster may auto-engage, and the native preference is respected. See the [guild-menu auto-attack report](docs/MONK-AUTOATTACK-REPORT.md). These previews are evaluated separately from the 1.9.1 PR.
 
 ## What changed in 1.9.1
 

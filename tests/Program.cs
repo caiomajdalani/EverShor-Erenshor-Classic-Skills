@@ -43,6 +43,10 @@ internal static class Program
         Check("moving away cancels queued punches", !MonkCombatPolicy.CanContinueFollowUp(true, true, true, true, true, 26));
         Check("disabling Monk cancels queued punches", !MonkCombatPolicy.CanContinueFollowUp(false, true, true, true, true, 4));
         Check("dead caster cannot finish queued punches", !MonkCombatPolicy.CanContinueFollowUp(true, true, false, true, true, 4));
+        Check("Sim Resonant Palm cannot activate player autoattack", !MonkCombatPolicy.ShouldAutoEngagePlayer(false, true));
+        Check("Sim cannot activate player autoattack when preference disabled", !MonkCombatPolicy.ShouldAutoEngagePlayer(false, false));
+        Check("player Resonant Palm respects disabled auto-engage preference", !MonkCombatPolicy.ShouldAutoEngagePlayer(true, false));
+        Check("player Resonant Palm can auto-engage when enabled", MonkCombatPolicy.ShouldAutoEngagePlayer(true, true));
         Console.WriteLine(passed + " regression checks passed.");
         return 0;
     }

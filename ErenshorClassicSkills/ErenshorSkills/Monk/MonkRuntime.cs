@@ -520,16 +520,17 @@ namespace ErenshorSkills.Monk
             Stats stats = user?.GetComponent<Stats>();
             Character caster = user?.GetComponent<Character>();
             if (stats == null || caster == null || !caster.Alive) return false;
+            bool localCaster = caster == GameData.PlayerControl?.Myself;
             if (stats.Stunned || stats.Feared)
             {
-                ChatHelper.SendCombat(
+                if (localCaster) ChatHelper.SendCombat(
                     $"You cannot use {definition.Name} while incapacitated.",
                     "#E7C76F");
                 return false;
             }
             if (target == null || !target.Alive || target == caster)
             {
-                ChatHelper.SendCombat(
+                if (localCaster) ChatHelper.SendCombat(
                     $"{definition.Name} requires a living enemy target.",
                     "#E7C76F");
                 return false;
@@ -538,13 +539,17 @@ namespace ErenshorSkills.Monk
                 target.transform.position);
             if (distance > 18f)
             {
-                ChatHelper.SendCombat(
+                if (localCaster) ChatHelper.SendCombat(
                     $"That target is beyond {definition.Name} range.",
                     "#E7C76F");
                 return false;
             }
             if (stats.Invisible) stats.BreakEffectsOnAction();
-            try { GameData.PlayerCombat?.ForceAttackOn(); } catch { }
+            // A Sim's ranged technique must never toggle the local player's
+            // combat state, including while that player is interacting with UI.
+            if (MonkCombatPolicy.ShouldAutoEngagePlayer(localCaster,
+                GameData.AutoEngageAttackOnSkill))
+                GameData.PlayerCombat?.ForceAttackOn();
             MonkAnimationDriver.Play(definition, caster.transform,
                 target.transform);
             if (SkillsPlugin.Instance != null)
@@ -589,16 +594,26 @@ namespace ErenshorSkills.Monk
             if (target.MyNPC != null && !target.MyNPC.SimPlayer)
                 target.MyNPC.ManageAggro(Mathf.Max(rawDamage * 2,
                     stats.Level * 3), caster);
-            if (dealt > 0)
-                UpdateSocialLog.CombatLogAdd(new ChatLogLine(
-                    $"You use {definition.Name} on {target.transform.name} for " +
-                    $"{dealt} physical damage.",
-                    ChatLogLine.LogType.PlayerHits));
-            else
-                UpdateSocialLog.CombatLogAdd(new ChatLogLine(
-                    $"{definition.Name} fails to harm " +
-                    $"{target.transform.name}.",
-                    ChatLogLine.LogType.PlayerHits));
+            LogTechniqueDamage(caster, target, definition, dealt);
+        }
+
+        private static void LogTechniqueDamage(Character caster,
+            Character target, MonkTechniqueDefinition definition, int dealt,
+            bool followUp = false)
+        {
+            bool localPlayer = caster == GameData.PlayerControl?.Myself;
+            string actorName = caster.MyNPC != null
+                ? caster.MyNPC.NPCName : caster.transform.name;
+            if (string.IsNullOrWhiteSpace(actorName)) actorName = caster.transform.name;
+            string source = localPlayer ? "You use" : actorName + " uses";
+            string message = dealt > 0
+                ? $"{source} {definition.Name} on {target.transform.name} for " +
+                    $"{dealt} physical damage" + (followUp ? " (follow-up)." : ".")
+                : (localPlayer ? "Your " : actorName + "'s ") +
+                    $"{definition.Name} fails to harm {target.transform.name}.";
+            UpdateSocialLog.CombatLogAdd(new ChatLogLine(message,
+                localPlayer ? ChatLogLine.LogType.PlayerHits
+                    : ChatLogLine.LogType.OthersHits));
         }
 
         private static IEnumerator FollowUpStrikes(SkillUseState state)
@@ -641,16 +656,8 @@ namespace ErenshorSkills.Monk
                 {
                     MonkAudio.PlayImpact(state.Definition,
                         target.transform.position + Vector3.up);
-                    string actorName = caster.MyNPC != null
-                        ? caster.MyNPC.NPCName : caster.transform.name;
-                    if (string.IsNullOrWhiteSpace(actorName))
-                        actorName = caster.transform.name;
-                    string source = localPlayer ? "You use" : actorName + " uses";
-                    UpdateSocialLog.CombatLogAdd(new ChatLogLine(
-                        $"{source} {state.Definition.Name} on " +
-                        $"{target.transform.name} for {dealt} physical damage (follow-up).",
-                        localPlayer ? ChatLogLine.LogType.PlayerHits
-                            : ChatLogLine.LogType.OthersHits));
+                    LogTechniqueDamage(caster, target, state.Definition, dealt,
+                        followUp: true);
                 }
             }
         }

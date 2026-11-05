@@ -2,6 +2,9 @@ namespace ErenshorSkills.Monk
 {
     internal static class MonkCombatPolicy
     {
+        internal static bool ShouldAutoEngagePlayer(bool localCaster,
+            bool autoEngageEnabled) => localCaster && autoEngageEnabled;
+
         internal static bool CanContinueFollowUp(bool enabled, bool actorIsMonk,
             bool actorAlive, bool targetAlive, bool stillTargeting,
             float distanceSquared)
