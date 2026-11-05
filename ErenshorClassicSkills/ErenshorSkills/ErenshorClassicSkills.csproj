@@ -4,7 +4,7 @@
     <TargetFramework>netstandard2.1</TargetFramework>
     <AssemblyName>ErenshorClassicSkills</AssemblyName>
     <RootNamespace>ErenshorSkills</RootNamespace>
-    <Version>1.9.1</Version>
+    <Version>1.9.2</Version>
     <LangVersion>latest</LangVersion>
     <ReferenceDirectory Condition="'$(ReferenceDirectory)' == ''">lib</ReferenceDirectory>
   </PropertyGroup>

@@ -1,6 +1,6 @@
 {
     "name": "ErenshorClassicSkills",
-    "version_number": "1.9.1",
+    "version_number": "1.9.2",
     "website_url": "",
     "description": "Adds 25 classic skills, tradeskills, SimCraft, bags and corpse runs, plus playable Necromancer and Monk classes. Native Lunaris API.",
     "dependencies": []

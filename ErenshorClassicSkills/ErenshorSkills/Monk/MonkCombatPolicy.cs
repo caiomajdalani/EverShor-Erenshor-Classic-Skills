@@ -2,6 +2,15 @@ namespace ErenshorSkills.Monk
 {
     internal static class MonkCombatPolicy
     {
+        internal static bool CanContinueFollowUp(bool enabled, bool actorIsMonk,
+            bool actorAlive, bool targetAlive, bool stillTargeting,
+            float distanceSquared)
+        {
+            return enabled && actorIsMonk && stillTargeting &&
+                CanActivate(actorAlive, false, true, targetAlive, false,
+                    true, distanceSquared, 5f);
+        }
+
         internal static bool CanActivate(bool casterAlive, bool npc,
             bool offensive, bool targetAlive, bool selfTarget,
             bool matchesAggro, float distanceSquared, float reach)

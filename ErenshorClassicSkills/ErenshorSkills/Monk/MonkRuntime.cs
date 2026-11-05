@@ -611,8 +611,18 @@ namespace ErenshorSkills.Monk
                 if (index > 0) yield return new WaitForSeconds(0.15f);
                 Character caster = state.CasterCharacter;
                 Character target = state.TargetCharacter;
-                if (caster == null || target == null || !caster.Alive ||
-                    !target.Alive || !MonkCatalog.IsMonkPlayer()) yield break;
+                if (caster == null || target == null || caster.MyStats == null)
+                    yield break;
+                bool localPlayer = caster == GameData.PlayerControl?.Myself;
+                Character currentTarget = localPlayer
+                    ? GameData.PlayerControl?.CurrentTarget
+                    : caster.MyNPC?.CurrentAggroTarget;
+                if (!MonkCombatPolicy.CanContinueFollowUp(
+                    SkillsPlugin.CfgEnableMonk?.Value == true,
+                    MonkCatalog.IsMonkClass(caster.MyStats.CharacterClass),
+                    caster.Alive, target.Alive, currentTarget == target,
+                    (target.transform.position - caster.transform.position).sqrMagnitude))
+                    yield break;
                 int rawDamage = Mathf.Max(1, Mathf.RoundToInt(
                     caster.MyStats.Level * state.Definition.Power * 0.20f));
                 int dealt;
@@ -631,11 +641,16 @@ namespace ErenshorSkills.Monk
                 {
                     MonkAudio.PlayImpact(state.Definition,
                         target.transform.position + Vector3.up);
+                    string actorName = caster.MyNPC != null
+                        ? caster.MyNPC.NPCName : caster.transform.name;
+                    if (string.IsNullOrWhiteSpace(actorName))
+                        actorName = caster.transform.name;
+                    string source = localPlayer ? "You use" : actorName + " uses";
                     UpdateSocialLog.CombatLogAdd(new ChatLogLine(
-                        $"{state.Definition.Name} strikes " +
-                        $"{target.transform.name} " +
-                        $"for {dealt} physical damage.",
-                        ChatLogLine.LogType.PlayerHits));
+                        $"{source} {state.Definition.Name} on " +
+                        $"{target.transform.name} for {dealt} physical damage (follow-up).",
+                        localPlayer ? ChatLogLine.LogType.PlayerHits
+                            : ChatLogLine.LogType.OthersHits));
                 }
             }
         }

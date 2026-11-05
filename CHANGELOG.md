@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.9.2 — local preview: Pummel follow-up attribution (2026-11-04)
+
+- Attribute Sim follow-up messages to their actual NPC name and OthersHits instead of anonymous PlayerHits.
+- Validate the actual caster's Monk class and combat state rather than requiring the local player to be a Monk.
+- Cancel pending punches on retarget, death, leaving melee range or disabling the class.
+- Add six policy regressions (29 total). Preserve damage tuning and learned-ability data.
+- See docs/MONK-PUMMEL-REPORT.md for evidence, limitations and the tester scenario. This preview is separate from PR #2 / 1.9.1.
+
+
 ## 1.9.1 — Monk corrections and complete player guide (2026-11-04)
 
 Follow-up to merged upstream PR #1. Full player-guide restoration and source-checked class progressions are included with the Monk corrections. Future fixes will receive new versions.

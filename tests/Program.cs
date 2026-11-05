@@ -37,6 +37,12 @@ internal static class Program
         Check("melee cannot hit from ranged distance", !MonkCombatPolicy.CanActivate(true, true, true, true, false, true, 100, 5));
         Check("stone throw remains ranged", MonkCombatPolicy.CanActivate(true, true, true, true, false, true, 100, 18));
         Check("invalid Monk distance rejected", !MonkCombatPolicy.CanActivate(true, true, true, true, false, true, float.NaN, 5));
+        Check("Sim follow-up uses actor Monk class independently of player", MonkCombatPolicy.CanContinueFollowUp(true, true, true, true, true, 4));
+        Check("non-Monk actor cannot continue a queued Monk attack", !MonkCombatPolicy.CanContinueFollowUp(true, false, true, true, true, 4));
+        Check("retarget cancels queued punches", !MonkCombatPolicy.CanContinueFollowUp(true, true, true, true, false, 4));
+        Check("moving away cancels queued punches", !MonkCombatPolicy.CanContinueFollowUp(true, true, true, true, true, 26));
+        Check("disabling Monk cancels queued punches", !MonkCombatPolicy.CanContinueFollowUp(false, true, true, true, true, 4));
+        Check("dead caster cannot finish queued punches", !MonkCombatPolicy.CanContinueFollowUp(true, true, false, true, true, 4));
         Console.WriteLine(passed + " regression checks passed.");
         return 0;
     }
