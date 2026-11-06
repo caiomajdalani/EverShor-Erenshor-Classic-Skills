@@ -1,4 +1,6 @@
-# Submitting this branch
+# Updating the existing PR branch
+
+PR #2 remains open. Its existing head branch is release/1.9.1; the contained plugin version has advanced to 1.9.2. Push updates to that same branch to preserve the review instead of opening another PR.
 
 PR #1 is already merged upstream. This 1.9.1 follow-up uses a new branch. The local checkout is based on the real upstream history; no upstream write access or published fork is assumed. Branch: `release/1.9.1`. The configured origin is the official repository. Commit authorship uses the local Codex contributor identity; review it and configure your preferred Git identity before publishing.
 

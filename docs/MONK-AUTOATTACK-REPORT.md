@@ -20,4 +20,4 @@ The actor/preference truth table has four linked production-policy tests. Togeth
 
 ## Reproduction and confirmation
 
-With a Sim Monk of level 7+ fighting nearby, leave the player out of attack mode and interact with the guild UI. A Sim's Resonant Palm must name the Sim and must not enable player auto-attack. Repeat while the player is a non-Monk. For a player Monk, casting Resonant Palm should auto-engage only when the native option is enabled. This preview does not modify the submitted 1.9.1 PR.
+With a Sim Monk of level 7+ fighting nearby, leave the player out of attack mode and interact with the guild UI. A Sim's Resonant Palm must name the Sim and must not enable player auto-attack. Repeat while the player is a non-Monk. For a player Monk, casting Resonant Palm should auto-engage only when the native option is enabled. This correction is now included in PR #2 as part of version 1.9.2.

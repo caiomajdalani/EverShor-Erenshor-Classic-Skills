@@ -20,4 +20,4 @@ Six added production-policy regressions cover caster class, independent Sim elig
 
 ## Tester check
 
-Use a Monk who has not learned Pummel alongside a Sim Monk who can use it. Confirm that small follow-up lines name the Sim. Also repeat with a non-Monk player: the Sim's ability should no longer depend on the player's class. If an actual "You use Pummel" line appears for a player without it, retain the build version and combat log so the activation path can be investigated separately. This preview remains separate from the submitted 1.9.1 PR until evaluated.
+Use a Monk who has not learned Pummel alongside a Sim Monk who can use it. Confirm that small follow-up lines name the Sim. Also repeat with a non-Monk player: the Sim's ability should no longer depend on the player's class. If an actual "You use Pummel" line appears for a player without it, retain the build version and combat log so the activation path can be investigated separately. This correction is now included in PR #2 as part of version 1.9.2.

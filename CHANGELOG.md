@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.9.2 — local previews: Monk follow-up and auto-attack isolation (2026-11-04)
+## 1.9.2 — Monk follow-up and auto-attack isolation (2026-11-05)
 
 - Attribute Sim follow-up messages to their actual NPC name and OthersHits instead of anonymous PlayerHits.
 - Validate the actual caster's Monk class and combat state rather than requiring the local player to be a Monk.
@@ -8,7 +8,7 @@
 - Preview 2 fixes Resonant Palm unconditionally enabling local-player auto-attack when cast by a Sim. Only the actual player may auto-engage, respecting the native preference.
 - Preview 2 also attributes Resonant Palm damage to its real caster and suppresses player-facing cast-failure messages for Sims.
 - Add six follow-up and four auto-engage policy regressions (33 total). Preserve damage tuning and learned-ability data.
-- See docs/MONK-PUMMEL-REPORT.md for evidence, limitations and the tester scenario. This preview is separate from PR #2 / 1.9.1.
+- See docs/MONK-PUMMEL-REPORT.md for evidence, limitations and the tester scenario. These fixes are now included in PR #2, advancing its proposed version from 1.9.1 to 1.9.2.
 
 
 ## 1.9.1 — Monk corrections and complete player guide (2026-11-04)

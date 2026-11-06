@@ -107,3 +107,11 @@ Baseline: ff821f1d2cfce194f792c68749e6dd51491eb5ea. Every changed/added/removed 
 | `ErenshorClassicSkills/ErenshorSkills/Plugin.cs`, project and manifest | Consistent version 1.9.1 |
 | `ErenshorClassicSkills/ErenshorClassicSkills-v1.9.1-Changes.md` | Follow-up release notes and unresolved runtime scenarios |
 | README, changelog and review/validation documents | Full gameplay guide plus current 1.9.1 review scope |
+
+## 1.9.2 additions to existing PR #2
+
+- MonkRuntime.cs: actual-caster gating for Resonant Palm auto-engage, native option handling and shared caster-specific combat logging; queued follow-up eligibility.
+- MonkCombatPolicy.cs and tests/Program.cs: ten additional follow-up/auto-engage regressions (33 total).
+- Plugin/project/manifest: version 1.9.2.
+- MONK-PUMMEL-REPORT.md, MONK-AUTOATTACK-REPORT.md and ErenshorClassicSkills-v1.9.2-Changes.md: source findings, release notes and pending runtime scenarios.
+- README, changelog, PR description and validation/submission guides: consolidated 1.9.2 review scope on the existing PR branch.

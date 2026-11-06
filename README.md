@@ -19,6 +19,7 @@ The mod contains **25 trainable skills**: seven utility/gathering skills, eight 
 - [Commands](#chat-commands)
 - [Keybinds](#default-keybinds)
 - [Configuration](#configuration)
+- [What changed in 1.9.2](#what-changed-in-192)
 - [What changed in 1.9.1](#what-changed-in-191)
 - [What changed in 1.9.0](#what-changed-in-190)
 
@@ -718,9 +719,9 @@ The integrated **Attack Sync Fix** adjusts hit timing to match attack animations
 
 **Item Compare is a separate mod.** It is not part of this Classic Skills DLL. The spell-cast Diagnostics plugin is also a separate troubleshooting tool, not a gameplay feature required by Classic Skills.
 
-## Local 1.9.2 preview: Pummel messages
+## What changed in 1.9.2
 
-A nearby Sim Monk can produce Pummel follow-up hits even if your character has never learned Pummel. The 1.9.2 preview identifies the real caster in the combat log and isolates follow-up eligibility from the local player class. See the [report and tester check](docs/MONK-PUMMEL-REPORT.md). Preview 2 also fixes a Sim Resonant Palm cast enabling the player's auto-attack: only the local caster may auto-engage, and the native preference is respected. See the [guild-menu auto-attack report](docs/MONK-AUTOATTACK-REPORT.md). These previews are evaluated separately from the 1.9.1 PR.
+A nearby Sim Monk can produce Pummel follow-up hits even if your character has never learned Pummel. Version 1.9.2 identifies the real caster in the combat log and isolates follow-up eligibility from the local player class. See the [report and tester check](docs/MONK-PUMMEL-REPORT.md). Version 1.9.2 also fixes a Sim Resonant Palm cast enabling the player's auto-attack: only the local caster may auto-engage, and the native preference is respected. See the [guild-menu auto-attack report](docs/MONK-AUTOATTACK-REPORT.md). These fixes are included in PR #2 alongside the earlier 1.9.1 corrections. See the [1.9.2 release notes](ErenshorClassicSkills/ErenshorClassicSkills-v1.9.2-Changes.md).
 
 ## What changed in 1.9.1
 

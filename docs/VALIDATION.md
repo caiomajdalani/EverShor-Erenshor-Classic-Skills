@@ -1,6 +1,6 @@
-# Validation record — 2026-11-04
+# Validation record — 2026-11-05
 
-Baseline: merged upstream PR #1 / `28516e6` (native Lunaris 1.9.0). Candidate: 1.9.1 on branch `release/1.9.1`. Earlier 1.9.0 migration evidence remains in the Git history. Community testing of 1.9.1 is ongoing and has reported partial improvements; exact tester scenarios have not been captured as a complete reproducible matrix.
+Baseline: merged upstream PR #1 / `28516e6` (native Lunaris 1.9.0). Candidate: 1.9.2 (including the 1.9.1 changes) on branch `release/1.9.1`. Earlier 1.9.0 migration evidence remains in the Git history. Community testing of 1.9.1 is ongoing and has reported partial improvements; exact tester scenarios have not been captured as a complete reproducible matrix.
 
 ## Automated evidence
 
@@ -8,11 +8,11 @@ Baseline: merged upstream PR #1 / `28516e6` (native Lunaris 1.9.0). Candidate: 1
 |---|---|---|
 | Release / Debug builds | PASS, zero errors | .NET SDK 8.0.427, supplied assembly hashes |
 | Compiler warnings | 2 MSB3277 warnings per build | Lunaris System.Net.Http/System.IO.Compression versions; see BUILDING.md |
-| Documentation links | PASS, 13 paths | local paths in maintained READMEs/docs; anchors not checked |
-| Version agreement | PASS | project, plugin constant and manifest all 1.9.1 |
+| Documentation links | PASS, 16 paths | local paths in maintained READMEs/docs; anchors not checked |
+| Version agreement | PASS | project, plugin constant and manifest all 1.9.2 |
 | Native loader source scan | PASS | legacy API declarations/references absent; migration data-path strings allowed |
 | Icon validation | PASS | 644 PNG headers, required class catalog counts, no exact duplicate hashes |
-| Combat policy regressions | PASS, 23 cases | actual production file linked into dependency-free runner |
+| Combat policy regressions | PASS, 33 cases | actual production file linked into dependency-free runner |
 | Literal Harmony target audit | PASS, 86 targets | typeof + string method-name attributes resolve in supplied assemblies |
 | Clean source archive | PASS | source-only checks pass after extraction with no lib/bin/obj inputs |
 | Bash script | NOT RUN | No Bash executable available locally; use the validated PowerShell entry point |
@@ -20,6 +20,8 @@ Baseline: merged upstream PR #1 / `28516e6` (native Lunaris 1.9.0). Candidate: 1
 The target audit does not resolve every overload, nameof-based annotation, optional reflection bridge or patch order. PNG header/hash checks do not prove rendering quality. No performance timing or profiler session was performed: allocation reductions are established by source inspection, not a measured FPS claim.
 
 ## Monk follow-up evidence
+
+The 1.9.2 additions include a concrete correction for Sim Resonant Palm enabling global player auto-attack, actor-specific Pummel/Resonant Palm logs and ten additional production-policy regressions. Source reports are in MONK-AUTOATTACK-REPORT.md and MONK-PUMMEL-REPORT.md. Runtime confirmation of the latest correction is pending.
 
 Eleven new regression cases cover actor life, self/dead targets, melee/ranged reach, NPC aggro-target ownership, utility timer isolation and invalid distances. The class gate, null-safe catalog lookups and NPC-vs-player dispatch paths are additionally covered by compilation and source review; they have not been exercised against Unity in these automated tests.
 
